@@ -1,5 +1,5 @@
 /*
- * phone.css —— 手机（≤ 820px 宽）布局覆盖层
+ * phone.css —— 手机视口（≤ 820px 宽，或 ≤ 480px 高的横屏）布局覆盖层
  *
  * 原版是桌面/电视优先：.app-shell 写死 min-width:960px，左侧栏固定 200px，
  * 海报网格 7 列，播放控制条按 900px 起排。在手机宽度下不是「布局偏大」，
@@ -11,7 +11,8 @@
  *   2. 顶栏收窄，频道条与状态位改为可伸缩；
  *   3. 内容区占满宽度，海报网格 7 列 → 3 列，榜单行改为竖排卡片；
  *   4. 播放控制条允许换行，保证 10 个按钮全部可点；
- *   5. 清晰度/选集面板改为贴底抽屉，触控目标不小于 42px。
+ *   5. 清晰度/选集面板改为贴底抽屉，触控目标不小于 42px；
+ *   6. 收回 compat.css 在安卓手机 WebView 上误加的电视字号阶梯（见第 13 节）。
  */
 
 /*
@@ -234,7 +235,7 @@
   .detail-tabs { padding: 6px 10px 0; gap: 4px; overflow-x: auto; scrollbar-width: none; }
   .detail-tabs::-webkit-scrollbar { display: none; }
   .detail-tab { flex: 0 0 auto; min-height: 42px; padding: 0 10px; font-size: 15px; white-space: nowrap; }
-  .detail-title-row h2, .detail-title { font-size: 17px; }
+  #detail-title, .detail-title-copy h2 { font-size: 17px; }
 
   /* 11. 我的 / 设置：桌面 2.3rem 内边距 + 70rem 双栏 */
   .account-page, .settings-page { top: 48px; padding: 10px 10px calc(24px + env(safe-area-inset-bottom)); }
@@ -321,6 +322,11 @@
   .sidebar { padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
   .side-item { flex-basis: 54px; width: 54px; min-width: 54px; min-height: 42px; font-size: 10px; }
   .side-icon { width: 18px; height: 18px; }
+  /* 同特异度镜像：否则上面那段 html.tv-shell 侧栏规则会赢过这里的横屏压缩 */
+  html.tv-shell .side-item { min-height: 42px; font-size: 10px; }
+  html.tv-shell .side-icon { flex-basis: 18px; width: 18px; height: 18px; }
+  html.tv-shell .app-shell.sidebar-icons .side-item { min-height: 42px; font-size: 10px; }
+  html.tv-shell .app-shell.sidebar-icons .side-icon { flex-basis: 18px; width: 18px; height: 18px; }
   .right-actions { top: auto; bottom: 108px; right: 10px; gap: 6px; }
   .round-action { min-width: 46px; padding: 4px; }
   .round-action span { font-size: 18px; }
