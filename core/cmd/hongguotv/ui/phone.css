@@ -247,6 +247,73 @@
 
   /* 12. 弹幕面板：桌面 380~480px 侧栏 → 手机全宽覆盖 */
   .discussion-panel { width: 100%; padding: 12px; border-left: 0; }
+
+  /* 13. 收回 compat.css 的电视字号阶梯
+     app.js 用 UA 里的 HongguoTV-Android 判定电视壳，安卓手机的 WebView 同样命中；
+     而 compat.css 的侧栏阶梯只看视口高度（561~850），竖屏手机约 800 CSS px 高
+     正好落进区间，于是 side-item 被放大到 min-height:54px / font-size:20px / 32px 图标，
+     全站字号也跟着放大一档。这些规则带 html.tv-shell 前缀，特异度高于本文件的普通类选择器，
+     所以必须用同样的前缀覆盖，而不是另起一条。
+     上游用 tests/tv-typography.test.cjs 锁死了 compat.css 的结构（1280x720 的 Zidoo
+     曾经因为按宽度收窄而整块内容区缩水），因此不改它，改在这里镜像覆盖。 */
+  html.tv-shell .brand { height: 0; font-size: 0; }
+  html.tv-shell .side-nav { margin-top: 0; padding: 0; }
+  html.tv-shell .side-item { min-height: 50px; padding: 4px 2px; font-size: 11px; }
+  html.tv-shell .side-icon { flex-basis: 22px; width: 22px; height: 22px; }
+  html.tv-shell .sidebar-bottom { margin-top: 0; padding-top: 0; }
+  html.tv-shell .sidebar-bottom .side-item + .side-item { margin-top: 0; }
+  html.tv-shell .app-shell.sidebar-icons .side-item { min-height: 50px; padding: 4px 2px; font-size: 11px; }
+  html.tv-shell .app-shell.sidebar-icons .side-icon { flex-basis: 22px; width: 22px; height: 22px; }
+  html.tv-shell .page-context { font-size: 13px; }
+  html.tv-shell .channel-tab { font-size: 13px; }
+  html.tv-shell .top-status { font-size: 12px; }
+  html.tv-shell .hero-top-copy strong { font-size: 15px; }
+  html.tv-shell .hero-top-copy span { font-size: 12px; }
+  html.tv-shell .hero-top-right { font-size: 12px; }
+  html.tv-shell .hero-top-right strong { font-size: 14px; }
+  html.tv-shell .catalog-heading { font-size: 16px; }
+  html.tv-shell .catalog-card-title { font-size: 13px; }
+  html.tv-shell .catalog-card-meta { font-size: 12px; }
+  html.tv-shell .hero-title { font-size: 20px; }
+  html.tv-shell .hero-episode { font-size: 14px; }
+  html.tv-shell .hero-summary { max-height: none; font-size: 14px; }
+  html.tv-shell .search-suggestion-name { font-size: 15px; }
+  html.tv-shell .search-suggestion-meta,
+  html.tv-shell .search-suggestion-kind { font-size: 12px; }
+  html.tv-shell .search-result-card-title,
+  html.tv-shell .new-card-title,
+  html.tv-shell .library-card-title { font-size: 13px; }
+  html.tv-shell .search-result-card-meta,
+  html.tv-shell .new-card-meta,
+  html.tv-shell .library-card-meta { font-size: 12px; }
+  html.tv-shell .library-card-time { font-size: 12px; }
+  html.tv-shell .new-filter,
+  html.tv-shell .rank-view-tab { font-size: 13px; }
+  html.tv-shell .rank-row-title { font-size: 15px; }
+  html.tv-shell .rank-row-meta,
+  html.tv-shell .rank-row-intro { font-size: 12px; }
+  html.tv-shell .rank-row-heat { font-size: 13px; }
+  html.tv-shell .radar-view-tab,
+  html.tv-shell .radar-filter,
+  html.tv-shell .radar-row { font-size: 13px; }
+  html.tv-shell .radar-title { font-size: 18px; }
+  html.tv-shell .radar-status,
+  html.tv-shell .radar-table-head,
+  html.tv-shell .radar-section-heading span { font-size: 12px; }
+  html.tv-shell .radar-section-heading h3 { font-size: 15px; }
+  html.tv-shell .radar-rank { font-size: 14px; }
+
+  /* 14. 老 WebView（Android 6 / Chromium 44）不支持 flex gap，compat.js 会加
+     legacy-flex-gap 用外边距代替；电视那套 15px 左边距在竖排的底部导航里会把文字挤歪。 */
+  .legacy-flex-gap .side-nav > * + *,
+  .legacy-flex-gap .sidebar-bottom > * + * { margin-left: 4px; }
+  .legacy-flex-gap.tv-shell .side-nav .side-item + .side-item { margin-top: 0; }
+  .legacy-flex-gap .side-item > * + * { margin-left: 0; }
+  .legacy-flex-gap .playback-buttons > * + *,
+  .legacy-flex-gap .playback-utility-group > * + * { margin-left: 6px; }
+  .legacy-flex-gap .right-actions > * + * { margin-left: 0; margin-top: 10px; }
+  .legacy-flex-gap .new-heading-row > * + *,
+  .legacy-flex-gap .rank-heading-row > * + * { margin-left: 10px; }
 }
 
 /* 横屏手机（矮视口）：底部导航压扁，避免吃掉播放画面；网格回到 4~5 列 */
