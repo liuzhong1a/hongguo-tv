@@ -1,0 +1,270 @@
+/*
+ * phone.css —— 手机（≤ 820px 宽）布局覆盖层
+ *
+ * 原版是桌面/电视优先：.app-shell 写死 min-width:960px，左侧栏固定 200px，
+ * 海报网格 7 列，播放控制条按 900px 起排。在手机宽度下不是「布局偏大」，
+ * 而是被强制成 960px 再裁切：内容区只剩不到 200px，控制条右半段和底部导航
+ * 的第 6~10 项直接掉到屏幕外。
+ *
+ * 这一层只做布局，不改任何 DOM 结构与类名语义：
+ *   1. 取消桌面最小尺寸，左侧栏落到屏幕底部并横向滚动；
+ *   2. 顶栏收窄，频道条与状态位改为可伸缩；
+ *   3. 内容区占满宽度，海报网格 7 列 → 3 列，榜单行改为竖排卡片；
+ *   4. 播放控制条允许换行，保证 10 个按钮全部可点；
+ *   5. 清晰度/选集面板改为贴底抽屉，触控目标不小于 42px。
+ */
+
+/*
+ * 触发条件用「窄 或 矮」：只判 max-width 会漏掉横屏手机——844x390 这类
+ * 横屏视口宽度大于 820，会退回桌面布局，导致 200px 侧栏 + 右侧操作列溢出屏幕。
+ * 矮视口（≤480）本身就只可能是手机横屏，所以两条并列。
+ */
+@media (max-width: 820px), (max-height: 480px) {
+  /* 0. 基础 */
+  html, body { overflow-x: hidden; -webkit-tap-highlight-color: transparent; }
+  button, a { touch-action: manipulation; }
+
+  /* 1. 取消桌面最小尺寸（关键：否则整页仍是 960px 宽被裁切） */
+  .app-shell {
+    min-width: 0;
+    min-height: 0;
+    flex-direction: column-reverse;   /* 侧栏在 DOM 里排前，反转后落到屏幕底部 */
+    height: 100vh;
+    height: 100dvh;
+    width: 100%;
+  }
+
+  /* 2. 左侧栏 → 底部横向导航（10 个项目，靠横滑取用） */
+  .sidebar {
+    flex: 0 0 auto;
+    width: 100%;
+    min-height: 0;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 4px 6px calc(4px + env(safe-area-inset-bottom));
+    border-right: 0;
+    border-top: 1px solid rgba(255, 255, 255, .08);
+    background: #101017;
+    scrollbar-width: none;
+  }
+  .sidebar::-webkit-scrollbar { display: none; }
+  .brand { display: none; }
+  /* 10 个项目（8 主 + 2 次）在 390px 上放不下，整条横向滚动；
+     不要用 sticky 把「我的/设置」钉在右端——实测会盖住第 5、6 项。 */
+  .side-nav {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 4px;
+    min-width: 0;
+    margin-top: 0;
+    padding: 0;
+    overflow: visible;
+  }
+  .side-nav .side-item + .side-item { margin-top: 0; }
+  .sidebar-bottom {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: row;
+    gap: 4px;
+    margin-top: 0;
+    padding-top: 0;
+    padding-left: 4px;
+    border-top: 0;
+    border-left: 1px solid rgba(255, 255, 255, .1);
+    background: #101017;
+  }
+  .sidebar-bottom .side-item + .side-item { margin-top: 0; }
+  .side-item {
+    flex: 0 0 60px;
+    width: 60px;
+    min-width: 60px;
+    min-height: 50px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    padding: 4px 2px;
+    font-size: 11px;
+    line-height: 1.15;
+    text-align: center;
+    border-radius: 10px;
+  }
+  .side-item > span { display: block; }
+  .app-shell.sidebar-icons .side-item > span { display: block; }
+  .app-shell.sidebar-icons .side-item { padding: 4px 2px; text-align: center; }
+  .app-shell.sidebar-icons .brand-mark { display: none; }
+  .app-shell.sidebar-icons .sidebar { flex-basis: auto; }
+  .side-icon, .app-shell.sidebar-icons .side-icon { width: 22px; height: 22px; }
+  .side-item.is-focused, .side-item:focus:not(.pointer-focus-muted) { transform: none; box-shadow: 0 0 0 2px #fff; }
+
+  /* 3. 内容区占满宽度 */
+  .main-surface,
+  .app-shell.sidebar-icons .main-surface {
+    width: 100%;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+  }
+  .main-surface.has-playback-drawer #hero { width: 100%; flex: 1 1 auto; }
+
+  /* 4. 顶栏：桌面 34px 内边距 + 固定 110/180px 两端，手机上一屏放不下 */
+  .top-bar { min-height: 0; padding: 6px 8px; gap: 6px; }
+  .page-context { width: auto; flex: 0 0 auto; max-width: 60px; font-size: 13px; }
+  .channel-tabs {
+    margin: 0;
+    flex: 1 1 auto;
+    min-width: 0;
+    gap: 3px;
+    padding: 3px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .channel-tabs::-webkit-scrollbar { display: none; }
+  .channel-tab { flex: 0 0 auto; min-width: 0; padding: 7px 11px; font-size: 13px; }
+  .top-status { width: auto; flex: 0 0 auto; padding: 4px; }
+  .top-status span { display: none; }        /* 只留绿/红连接图标，点开仍可看详情 */
+
+  /* 5. 推荐流：横向遮罩在 960px 上是氛围，在 390px 上是半屏黑 */
+  .hero-gradient { background: linear-gradient(180deg, rgba(11, 12, 16, .55), transparent 26%), linear-gradient(0deg, rgba(11, 12, 16, .92), transparent 42%); }
+  .hero-top-copy { top: 58px; left: 12px; right: 84px; }
+  .hero-top-right { top: 58px; right: 12px; font-size: 12px; }
+  .right-actions { top: auto; bottom: 158px; right: 10px; gap: 10px; }
+  .round-action { min-width: 54px; padding: 6px 5px; border-radius: 11px; }
+  .round-action span { font-size: 22px; }
+  .round-action small, .round-action .action-count { font-size: 11px; }
+  .hero-title, .hero-episode, .hero-summary { left: 12px; right: 76px; }
+
+  /* 6. 播放控制条：桌面按一行 900px 排，手机必须换行，否则后 4 个按钮不可点 */
+  .bottom-controls { right: 8px; bottom: 8px; left: 8px; gap: 6px; }
+  .playback-timeline { gap: 8px; }
+  .time-label { font-size: 12px; }
+  .playback-buttons { flex-wrap: wrap; gap: 6px; }
+  .playback-utility-group { margin-left: 0; gap: 6px; }
+  .control-button { min-height: 42px; padding: 8px; font-size: 14px; }
+  .playback-buttons .control-button.has-icon { width: 42px; min-width: 42px; padding: 8px; }
+  .playback-buttons .control-button.has-icon .control-content { width: 22px; height: 22px; }
+
+  /* 7. 页面工作区 */
+  .page-workspace { top: 48px; padding: 8px 10px calc(24px + env(safe-area-inset-bottom)); }
+  .page-workspace h1, .search-heading-row h1 { font-size: 20px; }
+  .search-heading-row { flex-wrap: wrap; align-items: flex-start; gap: 8px; margin-bottom: 12px; }
+  .search-heading-row p { font-size: 12px; }
+  .rank-heading-row, .new-heading-row, .library-heading-row {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    margin-bottom: 12px;
+  }
+  .rank-heading-row h1, .new-heading-row h1 { flex: 0 0 auto; }
+  .rank-tabs, .new-tabs { flex: 0 1 auto; min-width: 0; gap: 12px; overflow-x: auto; scrollbar-width: none; }
+  .rank-tabs::-webkit-scrollbar, .new-tabs::-webkit-scrollbar { display: none; }
+  .rank-tab, .new-tab { flex: 0 0 auto; min-height: 34px; font-size: 14px; }
+  .new-heading-row .new-filters { margin-left: 0; gap: 6px; }
+  .new-filter { min-width: 52px; min-height: 34px; padding: 0 10px; font-size: 13px; }
+
+  /* 海报网格：桌面 7 列 → 手机 3 列 */
+  .search-results, .new-grid, .library-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 8px; padding-bottom: 12px; }
+  .follow-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 8px; }
+  .detail-related-list { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 8px; }
+  .actor-works-list { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 8px; padding: 8px 10px 16px; }
+  .detail-cast-all { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .search-result-card-title { font-size: 13px; }
+
+  /* 榜单行：桌面四列横排 → 手机两行卡片 */
+  .rank-row {
+    grid-template-columns: 26px 78px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    grid-template-areas:
+      "rank poster copy"
+      "rank poster side";
+    align-items: start;
+    gap: 4px 9px;
+    min-height: 0;
+    padding: 10px 8px 10px 0;
+  }
+  .rank-row-rank { grid-area: rank; align-self: center; font-size: 18px; }
+  .rank-row-image { grid-area: poster; width: 78px; height: 104px; }
+  .rank-row-copy { grid-area: copy; gap: 3px; }
+  .rank-row-title { font-size: 15px; }
+  .rank-row-intro { display: none; }
+  .rank-row-side { grid-area: side; flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; }
+  .rank-row-heat { font-size: 13px; }
+  .rank-row-play { min-height: 34px; padding: 0 10px; font-size: 13px; }
+
+  /* 8. 播放器面板贴底抽屉，触控目标不小于 42px */
+  .player-options {
+    position: fixed;
+    right: 8px;
+    left: 8px;
+    bottom: calc(64px + env(safe-area-inset-bottom));
+    width: auto;
+    max-height: 58dvh;
+    overflow-y: auto;
+    padding: 12px;
+    border-radius: 14px;
+  }
+  .player-options-heading { margin-bottom: 8px; font-size: 15px; }
+  .player-options-heading .player-option { width: 42px; }
+  #player-options-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .player-option { min-height: 42px; font-size: 14px; }
+  .player-options.is-diagnostics { width: calc(100% - 16px); max-height: 74dvh; }
+  .player-status-actions .control-button { min-width: 92px; padding: 9px 12px; font-size: 14px; }
+
+  .notification-popup { right: 8px; bottom: calc(70px + env(safe-area-inset-bottom)); width: calc(100% - 16px); }
+
+  /* 9. 找剧页：它不是 .page-workspace，得单独收 */
+  .search-page { top: 48px; padding: 8px 10px calc(24px + env(safe-area-inset-bottom)); }
+  .search-input-wrap { flex: 1 1 100%; width: 100%; min-width: 0; }
+  .search-suggestions { width: 100%; max-width: 100%; }
+
+  /* 10. 详情页：桌面 92vw 居中弹窗 → 手机贴底抽屉 */
+  .detail-modal { padding: 0; align-items: flex-end; }
+  .detail-modal.is-playback-drawer { top: 0; right: 0; bottom: 0; left: 0; display: grid; place-items: end center; width: auto; padding: 0; background: rgba(0, 0, 0, .55); pointer-events: auto; }
+  .detail-modal.is-playback-drawer .detail-dialog { width: 100%; min-width: 0; max-width: 100%; height: auto; max-height: 72dvh; border-radius: 16px 16px 0 0; }
+  .detail-dialog { width: 100%; max-height: 92dvh; border-radius: 16px 16px 0 0; }
+  .detail-header { min-height: 0; gap: 12px; padding: 12px 14px; }
+  .detail-header-action { min-width: 62px; min-height: 42px; font-size: 13px; }
+  .detail-episodes { height: 42dvh; max-height: none; padding: 12px 14px 18px; }
+  /* 桌面 19px 四标签在 390px 上会竖着折行（「选/集」），必须禁折行并缩字号 */
+  .detail-tabs { padding: 6px 10px 0; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+  .detail-tabs::-webkit-scrollbar { display: none; }
+  .detail-tab { flex: 0 0 auto; min-height: 42px; padding: 0 10px; font-size: 15px; white-space: nowrap; }
+  .detail-title-row h2, .detail-title { font-size: 17px; }
+
+  /* 11. 我的 / 设置：桌面 2.3rem 内边距 + 70rem 双栏 */
+  .account-page, .settings-page { top: 48px; padding: 10px 10px calc(24px + env(safe-area-inset-bottom)); }
+  .account-heading h1, .settings-heading h1 { font-size: 1.35rem; }
+  .account-layout { flex-direction: column; gap: 12px; margin-top: 12px; }
+  .account-card, .settings-card { padding: 14px; border-radius: 12px; }
+  .account-card h2, .settings-card h2 { font-size: 1.05rem; margin-bottom: 10px; }
+  .account-country-button { min-width: 118px; }
+  .account-input { font-size: 1rem; }
+
+  /* 12. 弹幕面板：桌面 380~480px 侧栏 → 手机全宽覆盖 */
+  .discussion-panel { width: 100%; padding: 12px; border-left: 0; }
+}
+
+/* 横屏手机（矮视口）：底部导航压扁，避免吃掉播放画面；网格回到 4~5 列 */
+@media (max-height: 480px) {
+  .sidebar { padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
+  .side-item { flex-basis: 54px; width: 54px; min-width: 54px; min-height: 42px; font-size: 10px; }
+  .side-icon { width: 18px; height: 18px; }
+  .right-actions { top: auto; bottom: 108px; right: 10px; gap: 6px; }
+  .round-action { min-width: 46px; padding: 4px; }
+  .round-action span { font-size: 18px; }
+  .bottom-controls { right: 8px; bottom: 6px; left: 8px; gap: 4px; }
+  .playback-buttons { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .playback-buttons::-webkit-scrollbar { display: none; }
+  .control-button, .playback-buttons .control-button.has-icon { min-height: 38px; width: 38px; min-width: 38px; }
+  .search-results, .new-grid, .library-grid, .follow-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  /* 横屏时选集恢复成右侧抽屉，左边继续看画面 */
+  .detail-modal { padding: 0; }
+  .detail-modal.is-playback-drawer { display: flex; place-items: stretch; width: auto; background: transparent; pointer-events: none; }
+  .detail-modal.is-playback-drawer .detail-dialog { width: 320px; min-width: 320px; max-width: 320px; height: 100%; max-height: 100%; border-radius: 0; }
+  .player-options { bottom: calc(52px + env(safe-area-inset-bottom)); max-height: 72dvh; }
+}
