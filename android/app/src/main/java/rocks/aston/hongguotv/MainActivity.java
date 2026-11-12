@@ -69,6 +69,7 @@ public class MainActivity extends Activity {
     private int routedConfirmKeys;
     private AnimatedVectorDrawable startupAnimation;
     private AppUpdater appUpdater;
+    private RecommendedApps recommendedApps;
     private TvHomeChannelManager homeChannelManager;
     private String pendingHomeProgram;
     private volatile String diagnosticDeviceJSON = "{}";
@@ -151,6 +152,12 @@ public class MainActivity extends Activity {
             }
         });
         webView.addJavascriptInterface(appUpdater.new Bridge(), "HongguoTVUpdates");
+        recommendedApps = new RecommendedApps(this, new RecommendedApps.Host() {
+            public boolean trusted() { return pageReady && !destroyed; }
+            public boolean foreground() { return activityForeground; }
+            public void restoreFocus() { if (!destroyed && webView != null) { grantWebViewFocus(false); scheduleFullscreen(); } }
+        });
+        webView.addJavascriptInterface(recommendedApps.new Bridge(), "HongguoRecommendedApps");
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
@@ -164,6 +171,17 @@ public class MainActivity extends Activity {
                 routedConfirmKeys = 0;
                 searchInputFocusPolicy.reset();
                 super.onPageStarted(view, url, favicon);
+            }
+
+            @Override
+            @SuppressWarnings("deprecation")
+            public void onReceivedError(WebView view, int code, String description, String failingUrl) {
+                if (destroyed || rendererGone || view != webView) return;
+                super.onReceivedError(view, code, description, failingUrl);
+                if (Build.VERSION.SDK_INT < 23 && failingUrl != null && failingUrl.equals(view.getUrl())) {
+                    pageLoadFailed = true;
+                    showStartupFailure();
+                }
             }
 
             @Override
@@ -183,6 +201,10 @@ public class MainActivity extends Activity {
                     pageReady = true;
                     grantWebViewFocus(false);
                     appUpdater.start();
+                    if (BuildConfig.ANDROID5_COMPAT) {
+                        view.evaluateJavascript("!!(window.HongguoTV && typeof window.HongguoTV.remoteKey === 'function' && JSON.parse(window.HongguoTVDiagnostics.readDevice()).sdk >= 21 && document.activeElement && document.activeElement.getAttribute('data-focus') && JSON.parse(window.HongguoTVUpdates.getStatus()).variant === 'android5')",
+                                result -> android.util.Log.i("HongguoAndroid5", "ui_ready=" + result));
+                    }
                     homeChannelManager.ensureDefaultChannel(true);
                 }
                 view.evaluateJavascript("window.HongguoTV && window.HongguoTV." +
@@ -745,6 +767,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (recommendedApps != null) recommendedApps.pause();
         activityForeground = false;
         // Release the actual window flag while backgrounded, but retain the
         // playback intent so a foreground return can restore it immediately.
@@ -781,7 +804,14 @@ public class MainActivity extends Activity {
         }
         if (playerBridge != null) playerBridge.onResume();
         if (appUpdater != null) appUpdater.resume();
+        if (recommendedApps != null) recommendedApps.resume();
         recoverRendererIfAllowed();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (appUpdater != null) appUpdater.onRequestPermissionsResult(requestCode);
     }
 
     @Override
@@ -792,6 +822,7 @@ public class MainActivity extends Activity {
         inputEditingState.reset();
         searchNavigationState.reset();
         if (appUpdater != null) appUpdater.destroy();
+        if (recommendedApps != null) recommendedApps.destroy();
         if (homeChannelManager != null) {
             homeChannelManager.destroy();
             homeChannelManager = null;

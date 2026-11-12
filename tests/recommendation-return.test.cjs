@@ -61,7 +61,7 @@ function fixture({ failSave = false, writeGate = null, sourceGate = null } = {})
     var playbackRecovery={reset:function(){},next:function(){return 'stop'},attempts:function(){return 0}};
     var libraryData={owner_id:'account',entries:[]},libraryReady=Promise.resolve(),libraryQueue=Promise.resolve(),libraryLoaded=true,libraryError='',libraryEditing=false;
     var playerReturnPage=null,playerReturnFocus=null;
-    var searchPager={loaded:true,cancel:function(){}},searchKind='browse',activeSearchQuery='',searchHistory={load:function(){}};
+    var searchPager={loaded:true,cancel:function(){}},searchKind='browse',searchDiscovery=null,activeSearchQuery='',searchHistory={load:function(){}};
     var episodePrefetch={keepFor:function(){},consume:function(){return null},cancel:function(){}};
     function pageMode(){return shell.dataset.mode}function isPlaybackPage(){return pageMode()==='recommend'||pageMode()==='player'}function isLibraryPage(){return false}
     function playbackEngineName(){return ''}function nativePlaybackActive(){return false}
@@ -162,6 +162,17 @@ test('owner or channel changes reject an old session instead of restoring anothe
 test('completed episode resume follows existing history semantics and does not reuse the ending timestamp', () => {
   const f = fixture(); const item = f.c.feedItems[1];
   assert.deepEqual(plain(f.c.recommendationResume({ episode: 2, position: 90, completed: true, history: '' }, null, item)), { episode: 3, position: 0 });
+});
+test('sidebar continue watching survives a failed history write and resumes fullscreen through the existing player', async () => {
+  const f = fixture({failSave:true}), captured = [];
+  f.c.watchingReturn={capture:value=>captured.push(value),render(){}};
+  f.c.activatePage(f.c.pages.search); await f.flush();
+  assert.equal(captured[0].episode,2); assert.equal(captured[0].position,39);
+  f.c.setCinema=enabled=>f.c.shell.classList.toggle('is-cinema',enabled);
+  f.c.startPlayer(captured[0].item, f.c.document.getElementById('watching-return'), {watchingResume:captured[0]}); await f.flush();
+  assert.equal(f.c.activePlayback.item.series_id,'r1'); assert.equal(f.c.activePlayback.episode,2); assert.equal(f.c.activePlayback.position,39);
+  assert.equal(f.c.shell.classList.contains('is-cinema'),true);
+  f.c.leavePlayer(); await f.flush(); assert.equal(f.c.pageMode(),'search');
 });
 test('while the departure queue is pending, loading uses its requested episode rather than a partially saved older episode', () => {
   const f = fixture(); f.entry(2, 39);

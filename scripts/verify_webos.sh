@@ -5,6 +5,7 @@ repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 node_bin=${NODE:-node}
 
 "$node_bin" --check "$repo_dir/scripts/run_webos_http_direct_service.js"
+"$node_bin" --check "$repo_dir/webos/service/watch-statistics.js"
 "$node_bin" --check "$repo_dir/webos/service/range-media.js"
 "$node_bin" --check "$repo_dir/webos/service/account-scan.js"
 "$node_bin" --check "$repo_dir/webos/app/webos-updates.js"
@@ -18,6 +19,7 @@ node_bin=${NODE:-node}
 "$node_bin" --check "$repo_dir/webos/service/audio-multipart.js"
 "$node_bin" --check "$repo_dir/webos/service/audio-cancel.js"
 "$node_bin" --check "$repo_dir/webos/service/playback-identity.js"
+"$node_bin" --check "$repo_dir/webos/service/network-diagnostic.js"
 
 "$node_bin" - "$repo_dir" <<'NODE'
 var fs = require('fs');
@@ -80,6 +82,7 @@ NODE
 "$node_bin" "$repo_dir/webos/service/passport-sign.test.js"
 "$node_bin" "$repo_dir/webos/service/provider.test.js"
 "$node_bin" "$repo_dir/webos/service/search-season.test.js"
+"$node_bin" --test "$repo_dir/webos/service/search-discovery.test.js"
 "$node_bin" --test "$repo_dir/tests/webos-prefetch-recovery.test.cjs" "$repo_dir/tests/webos-playback-identity.test.cjs"
 "$node_bin" --test "$repo_dir/tests/webos-audio-controller.test.cjs" "$repo_dir/tests/webos-audio-local.test.cjs" "$repo_dir/tests/webos-audio-install.test.cjs"
 "$node_bin" "$repo_dir/webos/service/media-cache.test.js"
@@ -106,6 +109,14 @@ node - "$stage_test" <<'NODE'
 var fs = require('fs');
 var path = require('path');
 var root = process.argv[2];
+function verifyServiceFiles(directory) {
+  fs.readdirSync(directory).forEach(function (name) {
+    var file = path.join(directory, name);
+    if (fs.statSync(file).isDirectory()) verifyServiceFiles(file);
+    else if (/\.test\.js$/.test(name)) throw new Error('test harness leaked into staged service: ' + name);
+  });
+}
+verifyServiceFiles(path.join(root, 'service'));
 var app = JSON.parse(fs.readFileSync(path.join(root, 'app', 'appinfo.json'), 'utf8'));
 var adapter = fs.readFileSync(path.join(root, 'app', 'webos-adapter.js'), 'utf8');
 var service = JSON.parse(fs.readFileSync(path.join(root, 'service', 'services.json'), 'utf8'));

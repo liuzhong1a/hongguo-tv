@@ -2,6 +2,11 @@ name: Release APK
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_tagged_release:
+        description: Retry publishing the existing version tag using the current CI harness
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -24,6 +29,18 @@ jobs:
         run: python3 scripts/verify_release_source.py --event "$GITHUB_EVENT_NAME" --ref "$GITHUB_REF" --sha "$GITHUB_SHA"
       - name: Read APK version
         run: python3 scripts/release_metadata.py --github-env "$GITHUB_ENV"
+      - name: Pin existing tag for publication retry
+        if: inputs.publish_tagged_release
+        run: |
+          git fetch --no-tags origin "refs/tags/v$APP_VERSION"
+          release_commit="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          git diff --exit-code "$release_commit" HEAD -- core desktop android webos scripts go.mod go.sum
+          git fetch --no-tags --unshallow origin main || git fetch --no-tags origin main
+          git merge-base --is-ancestor "$release_commit" FETCH_HEAD
+          harness_commit="$(git rev-parse HEAD)"
+          git checkout --detach "$release_commit"
+          git restore --source "$harness_commit" --worktree -- .github/actions/android5-build
+          echo "HONGGUO_CORE_VERSION=$APP_VERSION-$release_commit" >> "$GITHUB_ENV"
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -89,7 +106,20 @@ jobs:
         env:
           VERSION: ${{ env.HONGGUO_CORE_VERSION }}
       - name: Prepare LGPL MPV libraries and source kit
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # Direct release URLs can return cached 504s repeatedly. Fetch the
+          # same pinned assets through GitHub's authenticated asset API first;
+          # prepare_mpv.py still verifies every existing SHA256 before use.
+          for attempt in 1 2 3; do
+            if gh release download v1.1.11 --repo media-kit/libmpv-android-video-build \
+              --pattern default-arm64-v8a.jar --pattern default-armeabi-v7a.jar \
+              --pattern default-x86_64.jar --dir tmp/mpv-deps --clobber; then
+              break
+            fi
+            sleep $((attempt * 5))
+          done
           python3 scripts/prepare_mpv.py
           python3 scripts/package_mpv_sources.py --out "$RUNNER_TEMP/hongguo-tv-mpv-library-source-$APP_VERSION.zip"
       - name: Verify standard and MPV dependency isolation
@@ -115,6 +145,15 @@ jobs:
         run: |
           python3 scripts/verify_apks.py --standard android/app/build/outputs/apk/standard/release/app-standard-release.apk --mpv android/app/build/outputs/apk/mpv/release/app-mpv-release.apk --version "$APP_VERSION" --standard-code "$APP_VERSION_CODE" --mpv-code "$MPV_VERSION_CODE" | tee "$RUNNER_TEMP/apk-verification.json"
           cat "$RUNNER_TEMP/apk-verification.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build and verify independent Android 5 compatibility APK
+        id: android5
+        uses: ./.github/actions/android5-build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/hongguo-release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
       - name: Remove temporary signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/hongguo-release.keystore"
@@ -123,11 +162,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/hongguo-release"
           cp android/app/build/outputs/apk/standard/release/app-standard-release.apk "$RUNNER_TEMP/hongguo-release/hongguo-tv-$APP_VERSION.apk"
           cp android/app/build/outputs/apk/mpv/release/app-mpv-release.apk "$RUNNER_TEMP/hongguo-release/hongguo-tv-mpv-$APP_VERSION.apk"
+          cp android/app/build/android5/outputs/apk/standard/release/app-standard-release.apk "$RUNNER_TEMP/hongguo-release/hongguo-tv-android5-$APP_VERSION.apk"
           cp "$RUNNER_TEMP/hongguo-tv-mpv-library-source-$APP_VERSION.zip" "$RUNNER_TEMP/hongguo-release/"
           python3 scripts/generate_update.py --apk "$RUNNER_TEMP/hongguo-release/hongguo-tv-$APP_VERSION.apk" --version "$APP_VERSION" --code "$APP_VERSION_CODE" --min-sdk "$APP_MIN_SDK" --notes "docs/releases/v$APP_VERSION.md" --out "$RUNNER_TEMP/hongguo-release/update.json"
           python3 scripts/generate_update.py --variant mpv --apk "$RUNNER_TEMP/hongguo-release/hongguo-tv-mpv-$APP_VERSION.apk" --version "$APP_VERSION" --code "$MPV_VERSION_CODE" --min-sdk 23 --notes "docs/releases/v$APP_VERSION.md" --library-source "$RUNNER_TEMP/hongguo-release/hongguo-tv-mpv-library-source-$APP_VERSION.zip" --out "$RUNNER_TEMP/hongguo-release/update-mpv.json"
+          python3 scripts/generate_update.py --variant android5 --apk "$RUNNER_TEMP/hongguo-release/hongguo-tv-android5-$APP_VERSION.apk" --version "$APP_VERSION" --code "$ANDROID5_VERSION_CODE" --min-sdk 21 --notes "docs/releases/v$APP_VERSION.md" --out "$RUNNER_TEMP/hongguo-release/update-android5.json"
           cd "$RUNNER_TEMP/hongguo-release"
-          sha256sum "hongguo-tv-$APP_VERSION.apk" "hongguo-tv-mpv-$APP_VERSION.apk" "hongguo-tv-mpv-library-source-$APP_VERSION.zip" > SHA256SUMS.txt
+          sha256sum "hongguo-tv-$APP_VERSION.apk" "hongguo-tv-mpv-$APP_VERSION.apk" "hongguo-tv-android5-$APP_VERSION.apk" "hongguo-tv-mpv-library-source-$APP_VERSION.zip" > SHA256SUMS.txt
       - name: Verify complete release bundle before publishing
         run: |
           python3 - <<'PY'
@@ -139,39 +180,36 @@ jobs:
           print('Verified independent update channels and allowlisted files:', ', '.join(p.name for p in files))
           PY
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publish_tagged_release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.APP_VERSION }}
           name: 红果短剧 v${{ env.APP_VERSION }}
           body_path: docs/releases/v${{ env.APP_VERSION }}.md
           files: |
             ${{ runner.temp }}/hongguo-release/hongguo-tv-${{ env.APP_VERSION }}.apk
             ${{ runner.temp }}/hongguo-release/hongguo-tv-mpv-${{ env.APP_VERSION }}.apk
+            ${{ runner.temp }}/hongguo-release/hongguo-tv-android5-${{ env.APP_VERSION }}.apk
             ${{ runner.temp }}/hongguo-release/hongguo-tv-mpv-library-source-${{ env.APP_VERSION }}.zip
             ${{ runner.temp }}/hongguo-release/SHA256SUMS.txt
             ${{ runner.temp }}/hongguo-release/update.json
             ${{ runner.temp }}/hongguo-release/update-mpv.json
+            ${{ runner.temp }}/hongguo-release/update-android5.json
       - name: Publish public download release
-        if: startsWith(github.ref, 'refs/tags/') && vars.HONGGUO_PUBLIC_RELEASES_ENABLED == 'true'
+        if: (startsWith(github.ref, 'refs/tags/') || inputs.publish_tagged_release) && vars.HONGGUO_PUBLIC_RELEASES_ENABLED == 'true'
         env:
           GH_TOKEN: ${{ secrets.HONGGUO_RELEASES_TOKEN }}
         run: |
           test -n "$GH_TOKEN" || { echo "Configure HONGGUO_RELEASES_TOKEN with Contents write access to the public download repository" >&2; exit 1; }
-          mkdir -p "$RUNNER_TEMP/hongguo-public-release"
-          cp "$RUNNER_TEMP/hongguo-release/hongguo-tv-$APP_VERSION.apk" "$RUNNER_TEMP/hongguo-public-release/"
-          cp "$RUNNER_TEMP/hongguo-release/hongguo-tv-mpv-$APP_VERSION.apk" "$RUNNER_TEMP/hongguo-public-release/"
-          cp "$RUNNER_TEMP/hongguo-release/update.json" "$RUNNER_TEMP/hongguo-public-release/"
-          # The LGPL source kit remains on the private signed Release. The
-          # public download repository only needs APKs, manifests and checksums.
-          python3 scripts/generate_update.py --variant mpv \
-            --apk "$RUNNER_TEMP/hongguo-public-release/hongguo-tv-mpv-$APP_VERSION.apk" \
-            --version "$APP_VERSION" --code "$MPV_VERSION_CODE" --min-sdk 23 \
-            --notes "docs/releases/v$APP_VERSION.md" \
-            --out "$RUNNER_TEMP/hongguo-public-release/update-mpv.json"
-          cd "$RUNNER_TEMP/hongguo-public-release"
-          sha256sum "hongguo-tv-$APP_VERSION.apk" "hongguo-tv-mpv-$APP_VERSION.apk" > SHA256SUMS.txt
-          cd - >/dev/null
+          python3 - <<'PY_STAGE'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from publish_public_release import stage_public_bundle
+          root = Path(os.environ['RUNNER_TEMP'])
+          stage_public_bundle(root / 'hongguo-release', root / 'hongguo-public-release')
+          PY_STAGE
           python3 scripts/publish_public_release.py --directory "$RUNNER_TEMP/hongguo-public-release" --notes "docs/releases/v$APP_VERSION.md"
       - name: Public publication setup reminder
-        if: startsWith(github.ref, 'refs/tags/') && vars.HONGGUO_PUBLIC_RELEASES_ENABLED != 'true'
+        if: (startsWith(github.ref, 'refs/tags/') || inputs.publish_tagged_release) && vars.HONGGUO_PUBLIC_RELEASES_ENABLED != 'true'
         run: echo "Public auto-publication is disabled until the scoped token is configured; signed release artifacts remain available for manual publication."

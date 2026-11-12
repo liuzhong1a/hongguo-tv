@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" width="320" height="180">
+  <title>红果短剧</title>
+  <rect width="320" height="180" fill="#DB411E" />
+  <g transform="translate(80 17.2) scale(1.6)">
+    <circle cx="50" cy="50" r="33" fill="#FFFFFF" />
+    <path d="M51 18 C51 11 56 8 63 8 C63 14 58 19 51 18 Z" fill="#FFFFFF" />
+    <path d="M43 36 L43 64 L68 50 Z" fill="#DB411E" stroke="#DB411E" stroke-width="4" stroke-linejoin="round" />
+  </g>
+</svg>

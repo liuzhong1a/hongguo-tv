@@ -15,6 +15,7 @@
     if (!process.env.HONGGUO_WEBOS_SERVICE_ID) process.env.HONGGUO_WEBOS_SERVICE_ID = serviceID;
     var provider = options.provider || require('./provider');
     var account = options.account || require('./account')({ dataDir: provider.dataDirectory ? provider.dataDirectory() : process.env.HONGGUO_WEBOS_DATA_DIR });
+    var watchStatistics = options.watchStatistics || require('./watch-statistics')({ dataDir: provider.dataDirectory ? provider.dataDirectory() : process.env.HONGGUO_WEBOS_DATA_DIR || require('os').tmpdir() });
     var numberInput = options.numberInput || require('./number-input')();
     var updates = options.updates || require('./updates')();
     var port = options.port === undefined ? Number(process.env.HONGGUO_WEBOS_PORT) || DEFAULT_PORT : options.port;
@@ -67,7 +68,7 @@
         implementation: 'experimental-js-service',
         platform: 'webos',
         port: port,
-        capabilities: ['web-ui', 'luna-service', 'html5-video', 'real-video-model-signing', 'cenc-aes-ctr', 'local-media-cache', 'range-media-proxy', 'category', 'rank', 'search', 'search-suggestions', 'series-detail', 'series-seasons', 'actor-works', 'player-stats', 'radar', 'local-library', 'search-history', 'number-input', 'account-login', 'account-mfa', 'follow', 'reservations', 'notifications', 'player-actions', 'cloud-library'],
+        capabilities: ['web-ui', 'luna-service', 'html5-video', 'real-video-model-signing', 'cenc-aes-ctr', 'local-media-cache', 'range-media-proxy', 'category', 'rank', 'search', 'search-suggestions', 'search-discovery', 'series-detail', 'series-seasons', 'actor-works', 'player-stats', 'radar', 'local-library', 'search-history', 'number-input', 'account-login', 'account-mfa', 'follow', 'reservations', 'notifications', 'player-actions', 'cloud-library'],
         experimental: true,
         playback_verified: false,
         protocol_verified: true,
@@ -169,7 +170,7 @@
         function stopPreparation() { preparationAbort.abort('PLAYBACK_PREPARATION_CANCELLED'); }
         function detachPreparation() { req.removeListener('aborted', stopPreparation); res.removeListener('close', stopPreparation); }
         req.once('aborted', stopPreparation); res.once('close', stopPreparation);
-        return provider.prepare(seriesID, vid, String(q.quality || ''), String(q.fallback || '') === '1', String(q.mode || ''), String(q.prefetch || '') === '1', preparationAbort.signal).then(function (result) {
+        return provider.prepare(seriesID, vid, String(q.quality || ''), String(q.fallback || '') === '1', String(q.mode || ''), String(q.prefetch || '') === '1', preparationAbort.signal, String(q.content_type || '')).then(function (result) {
           detachPreparation(); if (!res.destroyed && !preparationAbort.signal.aborted) data(req, res, result);
         }, function (error) {
           detachPreparation(); if (!res.destroyed && !preparationAbort.signal.aborted) failure(req, res, error);
@@ -224,7 +225,7 @@
         return provider.calendar(q).then(function (result) { data(req, res, result); }, function (error) { failure(req, res, error); });
       }
       if (pathName === '/api/v1/series/detail' || pathName === '/api/v1/SeriesDetail') {
-        return provider.detail(String(q.series_id || '')).then(function (result) { data(req, res, result); }, function (error) { failure(req, res, error); });
+        return provider.detail(String(q.series_id || ''), String(q.content_type || '')).then(function (result) { data(req, res, result); }, function (error) { failure(req, res, error); });
       }
       if (pathName === '/api/v1/series/seasons') {
         return provider.seasons(String(q.series_id || '')).then(function (result) { data(req, res, result); }, function (error) { failure(req, res, error); });
@@ -232,6 +233,10 @@
       if (pathName === '/api/v1/series/next-season') {
         if (typeof provider.nextSeason !== 'function') return failure(req, res, new Error('系列剧季关系服务未接入'));
         return provider.nextSeason(String(q.series_id || '')).then(function (result) { data(req, res, result); }, function (error) { failure(req, res, error); });
+      }
+      if (pathName === '/api/v1/search/discovery') {
+        if (req.method !== 'GET') return json(res, 405, { ok: false, message: 'method not allowed' }, req);
+        return Promise.resolve().then(function () { return provider.searchDiscovery(); }).then(function (result) { data(req, res, result); }, function (error) { failure(req, res, error); });
       }
       if (pathName === '/api/v1/search/suggestions') {
         return provider.suggestions(String(q.q || '')).then(function (result) { data(req, res, result); }, function (error) { failure(req, res, error); });
@@ -244,6 +249,16 @@
       }
       if (pathName === '/api/v1/player/stats') {
         return provider.engagement(String(q.series_id || ''), String(q.vid || '')).then(function (result) { data(req, res, result); }, function (error) { failure(req, res, error); });
+      }
+      if (pathName === '/api/v1/watch-statistics') {
+        var statsOwner = account.status().profile;
+        statsOwner = statsOwner && String(statsOwner.uid || '') || '';
+        if (String(q.owner_id || '') !== statsOwner) return json(res, 409, { ok: false, error: 'ACCOUNT_CHANGED' }, req);
+        var statsBody = req.method === 'POST' ? bodyJSON(req, 32768) : Promise.resolve(null);
+        return statsBody.then(function (body) {
+          if (body && body.owner_id !== statsOwner) throw Object.assign(new Error('账号已切换'), { status: 409 });
+          return watchStatistics.request(req.method, statsOwner, String(q.day || ''), body);
+        }).then(function (value) { data(req, res, value); }, function (error) { failure(req, res, error); });
       }
       if (pathName === '/api/v1/library') {
         if (req.method === 'GET' || req.method === 'HEAD') return data(req, res, account.librarySnapshot());

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -50,16 +51,17 @@ func TestMiniReelPlaybackRaceUsesSpareForMissingModel(t *testing.T) {
 }
 
 func TestMiniReelRouteRaceUsesAnotherProductionLineAfterEmptyResponse(t *testing.T) {
-	var routeCalls atomic.Int32
+	var emptyCalls, workingCalls atomic.Int32
 	emptyObserved := make(chan struct{})
+	var emptyObservedOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/empty") {
-			routeCalls.Add(1)
+			emptyCalls.Add(1)
 			_, _ = io.WriteString(w, ``)
-			close(emptyObserved)
+			emptyObservedOnce.Do(func() { close(emptyObserved) })
 			return
 		}
-		routeCalls.Add(1)
+		workingCalls.Add(1)
 		<-emptyObserved
 		_, _ = io.WriteString(w, miniReelRecoveryModel)
 	}))
@@ -77,15 +79,15 @@ func TestMiniReelRouteRaceUsesAnotherProductionLineAfterEmptyResponse(t *testing
 	if err != nil || len(options) != 1 || options[0].Codec != "h264" {
 		t.Fatalf("route race result = %#v, %v", options, err)
 	}
-	if routeCalls.Load() != 2 {
-		t.Fatalf("route calls = %d, want both routes attempted after empty response", routeCalls.Load())
+	if emptyCalls.Load() < 1 || emptyCalls.Load() > miniReelVideoModelAttempts || workingCalls.Load() != 1 {
+		t.Fatalf("route calls = empty %d, working %d; want a bounded empty retry and one successful alternate route", emptyCalls.Load(), workingCalls.Load())
 	}
 }
 
 func TestMiniReelPlaybackRaceDoesNotRotateForNoCompatibleSource(t *testing.T) {
 	var primaryRegistrations, spareRegistrations atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"code":0,"data":{"123":{"video_model":{"video_list":{"bytevc1":{"main_url":"https://media.example/video.mp4","codec_type":"bytevc1"}}}}}}`)
+		_, _ = io.WriteString(w, `{"code":0,"data":{"123":{"video_model":{"video_list":{"bytevc2":{"main_url":"https://media.example/video.mp4","codec_type":"bytevc2"}}}}}}`)
 	}))
 	defer server.Close()
 	primary := newMiniReelPlaybackDeviceCache(func() (miniReelDevice, error) {
@@ -189,7 +191,7 @@ func TestMiniReelCustomDeviceFallbackDoesNotRunForCodecMismatch(t *testing.T) {
 		if r.URL.Query().Get("device_id") == "987654" {
 			customRequests.Add(1)
 		}
-		_, _ = io.WriteString(w, `{"code":0,"data":{"123":{"video_model":{"video_list":{"bytevc1":{"main_url":"https://media.example/video.mp4","codec_type":"bytevc1"}}}}}}`)
+		_, _ = io.WriteString(w, `{"code":0,"data":{"123":{"video_model":{"video_list":{"bytevc2":{"main_url":"https://media.example/video.mp4","codec_type":"bytevc2"}}}}}}`)
 	}))
 	defer server.Close()
 	oldPrimary, oldSpare := miniReelPlaybackIdentity, miniReelPlaybackSpareIdentity

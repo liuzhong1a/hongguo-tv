@@ -63,7 +63,7 @@ function fixture({failWrite=false,ready=true,engine='standard',sourceGate=null,d
     function episodeLoadingText(){return 'loading'}function setPlayerStatus(text,failed){calls.push('status:'+text);if(failed){clearLastPlaybackFrame();if(activePlayback&&activePlayback.presentation)activePlayback.presentation.failed=true}}function revealControls(){}
     function tickDanmaku(){}function scheduleControlsHide(){}function maybePrefetchNextEpisode(){}
     function showNotice(x){notices.push(x)}function playMedia(){calls.push('play');return Promise.resolve()}
-  `+slice('clearPrefetchedEpisodeHint','setPlayerStatus')+slice('changeLibrary','toggleSaved')+slice('saveProgress','continueAfterEpisode')+
+  `+slice('restoreWatchingReturn','showRecommendationPlaceholder')+slice('clearPrefetchedEpisodeHint','setPlayerStatus')+slice('changeLibrary','toggleSaved')+slice('saveProgress','continueAfterEpisode')+
     slice('continueAfterEpisode','offerNextSeasonReservation')+slice('holdPlaybackAudio','renderFeed'),c);
   vm.runInContext('var media=video;'+source.slice(source.indexOf("  media.addEventListener('playing'"),source.indexOf("  document.addEventListener('visibilitychange'")),c);
   vm.runInContext("document.addEventListener('visibilitychange', function () { if (desktopShell) return; if (applicationHidden()) pauseForBackground(); else resumeFromBackground(); });",c);
@@ -90,6 +90,99 @@ async function readyFullEpisode(f, {pending=false}={}) {
   await tick();f.c.episodePrefetch=prefetch;
   return {prefetch,gate};
 }
+function readyPreview(f) {
+  f.c.prewarmedEpisodeCover={key:'2:9001:222',source:'https://img.example/next.jpg',ready:true,failed:false,
+    image:{src:'https://img.example/next.jpg'},waiters:[],series_id:'9001',vid:'222',episode:2,generation:1};
+}
+
+test('a fully prefetched target and decoded preview share one pre-source paint boundary without releasing the cover or audio',async()=>{
+  for(const [engine,native,inPlace] of [['range',false,true],['mpv',true,true],['mpv',true,false]])for(const automatic of [false,true]) {
+    const f=fixture({engine,native,inPlace});f.gate.resolve();await readyFullEpisode(f);readyPreview(f);
+    f.video.src='/media/old.mp4';
+    const old=f.c.activePlayback;old.completed=automatic;
+    f.c.playFeedItem(0,2,0,automatic?old:null);
+    assert.equal(f.hero.classList.contains('is-range-source-reset'),true);
+    assert.equal(f.hero.classList.contains('is-episode-cover'),true);
+    f.paint();await tick();
+    assert.equal(f.video.src,'/media/old.mp4','source cannot change before the preview reaches paint');
+    assert.equal(f.calls.includes('load'),false);
+    f.paint();await tick();
+    assert.equal(f.video.src,'/media/complete.mp4',engine+': '+automatic);
+    assert.equal(f.calls.filter(x=>x==='load').length,1);
+    assert.equal(f.frames.size,0,'no duplicate pre-source paint wait');
+    assert.equal(f.c.activePlayback.timing.automatic_next,automatic);
+    assert.equal(f.hero.classList.contains('is-preparing-video'),true);
+    assert.equal(f.c.activePlayback.presentation.rendered,false,'file readiness does not imply a first frame');
+    assert.equal(f.video.muted,true);
+    assert.equal(f.calls.includes('source'),false,'completed prefetch is handed off without foreground resolution');
+  }
+});
+
+test('missing or late previews, incomplete downloads and webOS retain the separate source-reset paint',async()=>{
+  for(const kind of ['missing','late','pending','webos']) {
+    const f=fixture({engine:'mpv',native:true,webos:kind==='webos'});f.gate.resolve();
+    const prep=await readyFullEpisode(f,{pending:kind==='pending'});
+    if(kind!=='missing')readyPreview(f);
+    if(kind==='late')f.c.prewarmedEpisodeCover.ready=false;
+    f.video.src='/media/old.mp4';f.c.playFeedItem(0,2,0);
+    f.paint();f.paint();await tick();
+    if(kind==='pending'){prep.gate.resolve({path:'/media/complete.mp4',mode:'full'});await tick();}
+    if(kind==='late')f.c.prewarmedEpisodeCover.waiters.forEach(fn=>fn(true));
+    assert.equal(f.video.src,'/media/old.mp4',kind);
+    f.paint();await tick();assert.equal(f.video.src,'/media/old.mp4',kind);
+    f.paint();await tick();assert.equal(f.video.src,'/media/complete.mp4',kind);
+  }
+});
+
+test('a changed preview or invalid full-file handoff cannot reuse the earlier cover paint',async()=>{
+  for(const kind of ['removed','replaced','owner','generation','detail','cache','range','late-file']) {
+    const detail=deferred(),f=fixture({engine:'mpv',native:true,detailGate:detail});
+    f.gate.resolve();await readyFullEpisode(f);readyPreview(f);
+    if(kind==='cache')f.c.waitForPlaybackPrefetch=()=>Promise.resolve(null);
+    if(kind==='range')f.c.waitForPlaybackPrefetch=()=>Promise.resolve({path:'/media/range',mode:'range'});
+    f.video.src='/media/old.mp4';f.c.playFeedItem(0,2,0);
+    f.paint();f.paint();await tick();
+    const cover=f.document.getElementById('hero-episode-cover');
+    if(kind==='removed')f.c.clearEpisodeCover();
+    if(kind==='replaced')cover.__episodeTarget={...cover.__episodeTarget};
+    if(kind==='owner')cover.__episodeTarget.owner--;
+    if(kind==='generation')cover.__episodeTarget.generation--;
+    if(kind==='detail')f.c.feedItems[0].vid_list[1]='different';
+    if(kind==='late-file')f.c.waitForPlaybackPrefetch=handoff=>{
+      handoff.timing.ready_at=Date.now()+10000;return handoff.promise;
+    };
+    detail.resolve();await tick();
+    assert.equal(f.video.src,'/media/old.mp4',kind);
+    f.paint();await tick();assert.equal(f.video.src,'/media/old.mp4',kind);
+    f.paint();await tick();assert.notEqual(f.video.src,'/media/old.mp4',kind);
+    assert.equal(f.video.muted,true);
+    assert.equal(f.hero.classList.contains('is-preparing-video'),true);
+  }
+});
+
+test('cancellation, background and a new selection cannot attach a source through the shared paint path',async()=>{
+  for(const kind of ['abort','background','hidden','account','generation','next']) {
+    const details=deferred(),f=fixture({engine:'mpv',native:true,detailGate:details});
+    f.gate.resolve();await readyFullEpisode(f);readyPreview(f);
+    f.video.src='/media/old.mp4';f.c.playFeedItem(0,2,0);
+    f.paint();f.paint();await tick();
+    if(kind==='abort')f.c.playbackInfoRequest.abort();
+    if(kind==='background')f.c.applicationInBackground=true;
+    if(kind==='hidden')f.document.hidden=true;
+    if(kind==='account'){f.c.accountEpoch++;f.c.playbackInfoRequest.abort();}
+    if(kind==='generation')f.c.feedGeneration++;
+    if(kind==='next')f.c.playFeedItem(0,3,0);
+    details.resolve();await tick();
+    assert.equal(f.video.src,'/media/old.mp4',kind);
+    if(kind==='next'){
+      await settlePlayback(f);assert.equal(f.c.activePlayback.episode,3);
+      assert.equal(f.video.src,'/media/next.mp4');
+      assert.equal(f.hero.classList.contains('is-episode-cover'),false);
+    }else{
+      await settlePlayback(f);assert.equal(f.video.src,'/media/old.mp4',kind);
+    }
+  }
+});
 
 test('completed full-file handoffs quiet manual next-episode switches across the HTML5 and native paths',async()=>{
   for(const [engine,native] of [['standard',false],['range',false],['standard',true],['mpv',true]]) {
@@ -691,6 +784,48 @@ test('early canplay and audio-only/no-video data cannot remove the cover or rest
   f.video.videoWidth=720;f.video.videoHeight=1280;f.handlers.loadeddata();await present(f);
   assert.equal(f.hero.classList.contains('is-preparing-video'),false);assert.equal(f.video.muted,false);
 });
+test('MPV can reveal on early real progress while frame-only and idle signals retain the cover',async()=>{
+  const f=await prepared({engine:'mpv',native:true});
+  f.hero.classList.add('is-episode-cover');
+  f.handlers.nativeframe({coreIdle:true});f.handlers.playing();await present(f);
+  assert.equal(f.hero.classList.contains('is-preparing-video'),true);
+  assert.equal(f.video.muted,true);
+  f.video.currentTime=.033;f.handlers.timeupdate();await present(f);
+  assert.equal(f.hero.classList.contains('is-preparing-video'),true,'idle output must remain covered');
+  f.handlers.nativeoutputstate({coreIdle:false});await present(f);
+  // Keep MPV's compositor boundary even when progress arrives before 500ms.
+  assert.equal(f.hero.classList.contains('is-preparing-video'),true);
+  const reveal=f.timers.find(t=>t.delay===32);
+  assert.ok(reveal);
+  reveal.fn();f.paint();await tick();
+  assert.equal(f.hero.classList.contains('is-preparing-video'),false);
+  assert.equal(f.video.muted,false);
+});
+test('early MPV progress still cannot reveal a hidden, failed or superseded target',async()=>{
+  for(const guard of ['background','hidden','source','error','next']) {
+    const f=await prepared({engine:'mpv',native:true});
+    f.handlers.nativeframe({coreIdle:false});f.handlers.playing();
+    if(guard==='background')f.c.applicationInBackground=true;
+    else if(guard==='hidden')f.document.hidden=true;
+    else if(guard==='source')f.video.src='/other.mp4';
+    else if(guard==='error')f.handlers.error();
+    else {f.c.playFeedItem(0,3,0);await settlePlayback(f);}
+    f.video.currentTime=.033;f.handlers.timeupdate();await present(f);
+    assert.equal(f.hero.classList.contains('is-preparing-video'),true,guard);
+    assert.equal(f.video.muted,true,guard);
+  }
+});
+test('a paused MPV target keeps its static-frame path without needing an early progress sample',async()=>{
+  const f=await prepared({engine:'mpv',native:true});
+  f.hero.classList.add('is-episode-cover');f.video.paused=true;
+  f.handlers.nativeframe({coreIdle:false});f.handlers.pause();await present(f);
+  const reveal=f.timers.find(t=>t.delay===32);
+  assert.ok(reveal);reveal.fn();f.paint();await tick();
+  assert.equal(f.hero.classList.contains('is-preparing-video'),false);
+  assert.equal(f.video.currentTime,0);
+  assert.equal(f.video.paused,true);
+  assert.equal(f.c.activePlayback.started,false);
+});
 test('sound is restored only after the cover and loading removal receive a paint',async()=>{
   const f=await prepared();f.handlers.playing();
   assert.equal(f.video.muted,true);f.paint();await tick();assert.equal(f.video.muted,true);
@@ -778,5 +913,26 @@ test('preparation messages cannot attach late errors to another generation or ac
     if(change==='playback') f.c.activePlayback={...old};
     assert.equal(f.c.preparationFailureMessage(old,error),'暂时无法播放这集');
     assert.equal(old.preparationError,undefined);
+  }
+});
+
+test('creator albums use per-upload IDs and type 1001 for first play, manual switches, auto-next and reverse selection',async()=>{
+  for(const automatic of [false,true]) {
+    const f=fixture();f.gate.resolve();
+    const albumID='7699818221737610265';
+    const card={series_id:albumID,title:'合集测试',content_type:'1003',episode_count:3,vid:'stale-preview'};
+    const detail={...card,vid:'7699812380099742744',vid_list:['7699812380099742744','7699818218021473342','7699812379890027544']};
+    f.c.feedItems=[card];f.c.activePlayback=null;
+    let details=0;f.c.getDetail=async()=>{details++;return detail;};f.c.firstVid=x=>x.vid||x.vid_list[0];
+    vm.runInContext(source.match(/  function playbackContentType\([^]*?\n  \}/)[0],f.c);
+    for(const episode of [1,2,3,1]) {
+      const old=f.c.activePlayback;if(old){old.started=true;old.completed=automatic;}
+      f.c.playFeedItem(0,episode,0,automatic&&old?old:null);await settlePlayback(f,30);
+      assert.equal(f.c.activePlayback.vid,detail.vid_list[episode-1]);
+      assert.equal(f.c.activePlayback.item.series_id,albumID);assert.equal(f.c.activePlayback.item.content_type,'1003');
+      const q=new URL('http://fixture'+f.resolverURLs.at(-1)).searchParams;
+      assert.equal(q.get('vid'),detail.vid_list[episode-1]);assert.equal(q.get('content_type'),'1001');
+    }
+    assert.equal(details,4,'even a first-episode preview must load the complete album directory');
   }
 });

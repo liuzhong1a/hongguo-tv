@@ -10,35 +10,20 @@ import (
 // Legacy POST identities belong to one resolution only, never to video_tab,
 // another episode, an account, or the old multi-route identity cache.
 type miniReelPlaybackSources struct {
-	tabEndpoint     string
-	tabIdentity     *miniReelPlaybackDeviceCache
-	legacyEndpoints []string
-	register        func(context.Context) (miniReelDevice, error)
-	client          *http.Client
+	tabEndpoint      string
+	tabIdentity      *miniReelPlaybackDeviceCache
+	legacyEndpoints  []string
+	register         func(context.Context) (miniReelDevice, error)
+	registeredSingle *miniReelSingleRegisteredSource
+	singleEndpoint   string
+	registerSingle   func(context.Context) (miniReelDevice, error)
+	client           *http.Client
+	memory           *miniReelSourceMemoryStore
 }
 
 func miniReelNativeOptionsWithSources(ctx context.Context, vid, codecMode, contentType string, sources miniReelPlaybackSources) ([]miniReelOption, error) {
-	if _, err := normalizeMiniReelCodecMode(codecMode); err != nil {
-		return nil, err
-	}
-	if _, err := normalizeMiniReelContentType(contentType); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	device, err := sources.tabIdentity.get(ctx)
-	if err == nil {
-		options, tabErr := miniReelVideoTabOptionsWithClient(ctx, vid, sources.tabEndpoint, device, codecMode, sources.client)
-		if tabErr == nil {
-			// An answered model with no compatible codec is not a failed lookup.
-			return options, nil
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return miniReelRegisteredFallbackOptions(ctx, vid, codecMode, contentType, sources)
+	sequence := newMiniReelSourceSequence(sources, vid, codecMode, contentType, "")
+	return sequence.next(ctx)
 }
 
 func miniReelRegisteredFallbackOptions(ctx context.Context, vid, codecMode, contentType string, sources miniReelPlaybackSources) ([]miniReelOption, error) {

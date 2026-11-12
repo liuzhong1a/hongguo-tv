@@ -172,7 +172,7 @@ func TestMiniReelMultiVideoModelUsesRegisteredIdentityAndDirectModel(t *testing.
 		if got := r.URL.Query().Get("cdid"); got != device.cdid {
 			t.Errorf("cdid = %q", got)
 		}
-		if r.Header.Get("X-Medusa") != "" {
+		if r.Header.Get("X-Argus") != "" {
 			assertMiniReelPlaybackSignature(t, r)
 		}
 		var body map[string]any
@@ -193,10 +193,10 @@ func TestMiniReelMultiVideoModelUsesRegisteredIdentityAndDirectModel(t *testing.
 		identities = append(identities, r.URL.Query().Get("device_id"), r.URL.Query().Get("iid"))
 		mu.Unlock()
 		if requestNumber < 3 {
-			if r.Header.Get("X-Medusa") == "" {
+			if r.Header.Get("X-Argus") == "" {
 				t.Error("first two requests must be signed")
 			}
-		} else if r.Header.Get("X-Medusa") != "" || r.Header.Get("X-Gorgon") != "" {
+		} else if r.Header.Get("X-Argus") != "" || r.Header.Get("X-Gorgon") != "" {
 			t.Error("last empty-response retry must preserve the unsigned compatibility path")
 		}
 		if requestNumber < 3 {
@@ -310,8 +310,13 @@ func TestMiniReelCodecModeFiltersOnlyIncompatibleSources(t *testing.T) {
 		t.Fatalf("default candidates = %#v, %v; want h264 and bytevc1, with legacy bytevc2 filtering", legacy, err)
 	}
 	software, err := parse("software")
-	if err != nil || len(software) != 1 || software[0].Codec != "h264" {
-		t.Fatalf("software candidates = %#v, %v; want h264 only", software, err)
+	if err != nil || len(software) != 2 {
+		t.Fatalf("software candidates = %#v, %v; want h264 and bytevc1", software, err)
+	}
+	for _, option := range software {
+		if option.Codec != "h264" && option.Codec != "bytevc1" {
+			t.Fatalf("software decoding admitted an unsupported codec: %#v", option)
+		}
 	}
 	auto, err := parse("auto")
 	if err != nil || len(auto) != 2 {

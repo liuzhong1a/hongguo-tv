@@ -31,6 +31,8 @@ var deviceRegisterFailures = 0;
 var deviceRegistration = null;
 var videoModelEmptyResponses = 0;
 var videoModelFallback = '';
+var videoModelInline = null;
+var fallbackResponseForPath = null;
 var fallbackRequests = [];
 var fallbackStatus = 200;
 var fallbackLocation = '';
@@ -38,6 +40,8 @@ var fallbackResponseBody = '';
 var mediaDownloadRequests = 0;
 var videoSpade = '';
 var videoModelStatus = 200;
+var albumFixture = require('../../core/cmd/hongguotv/testdata/creator-album.json');
+var albumRequests = [];
 var html = '<script>window._ROUTER_DATA=' + JSON.stringify({ loaderData: { detail_page: {
   seriesDetail: {
     series_id: seriesID,
@@ -72,6 +76,10 @@ https.request = function (options) {
     var body = html;
     var responseStatus = 200;
     var responseHeaders = {};
+    if (options.path.indexOf('/novel/player/album_detail/v1/') >= 0) {
+      albumRequests.push({ options: options, body: JSON.parse(Buffer.concat(requestChunks).toString('utf8')) });
+      body = JSON.stringify(albumFixture);
+    }
     if (options.path.indexOf('/service/2/device_register/') >= 0) {
       deviceRegisterRequests++;
       deviceRegistration = { options: options, query: Object.fromEntries(new URL('https://fixture.test' + options.path).searchParams), body: Buffer.concat(requestChunks) };
@@ -97,18 +105,29 @@ https.request = function (options) {
       var playbackQuery = Object.fromEntries(new URL('https://fixture.test' + options.path).searchParams);
       var playbackBody = JSON.parse(Buffer.concat(requestChunks).toString('utf8'));
       playbackRequests.push({ options: options, query: playbackQuery, body: playbackBody });
-      var videoID = playbackBody.mixed_video_id_map['1004'][0], entry = {};
-      if (videoModelFallback) entry[videoID] = { video_model: { fallback_api: videoModelFallback } };
+      var playbackType = Object.keys(playbackBody.mixed_video_id_map)[0];
+      var videoID = playbackBody.mixed_video_id_map[playbackType][0], entry = {};
+      if (videoModelFallback) entry[videoID] = { video_model: Object.assign({}, videoModelInline || {}, { fallback_api: videoModelFallback }) };
       else entry[videoID] = { video_model: { video_list: [{ main_url: 'https://media.example.test/episode.mp4', video_meta: { vheight: 720, definition: '720P' }, encrypt_info: videoSpade ? { spade_a: videoSpade } : {} }] } };
       if (videoModelEmptyResponses > 0) { videoModelEmptyResponses--; body = ''; }
       else body = JSON.stringify({ code: 0, data: entry });
     }
+    if (options.path.indexOf('/novel/player/video_model/v1/') >= 0) {
+      responseStatus = videoModelStatus;
+      body = '{"code":0,"data":{}}';
+    }
     if (options.path.indexOf('/playback/fallback') >= 0) {
       fallbackRequests.push({ options: options, headers: options.headers, path: options.path });
       responseStatus = fallbackStatus;
-      body = fallbackResponseBody;
+      body = fallbackResponseForPath ? fallbackResponseForPath(options.path) : fallbackResponseBody;
     }
     if (options.path.indexOf('/reading/bookapi/plan/v') >= 0) body = '{"code":0,"data":[]}';
+    if (options.path.indexOf('/reading/bookapi/bookmall/cell/change/v') >= 0) {
+      body = JSON.stringify({code:0,data:{has_more:false,next_offset:1,cell_view:{cell_data:[{video_data:[{
+        rec_tags:[{rec_type:9,content:'9625万热度'},{rec_type:9,content:'男频榜 No.1',schema:'sslocal://rank',rec_icon_url:'https://example.test/rank.png'}],video_detail:{series_id:seriesID,series_title:'推荐首集',episode_cnt:80,first_vid:'2234567890123456789',
+        content_type:'1004',video_category_type:'ai_video',category_schema:JSON.stringify([{category_id:5463,name:'爱情',schema:'dragon8662://categorySearch?categoryId=5463'},{name:'都市爱情'},{name:'爱情'}])}
+      }]}]}}});
+    }
     if (options.path.indexOf('/reading/distribution/category/landpage/v/') >= 0) {
       categoryRequest = { options: options, query: Object.fromEntries(new URL('https://fixture.test' + options.path).searchParams), body: Buffer.concat(requestChunks).toString('utf8') };
       body = JSON.stringify({ code: 0, data: { has_more: true, next_offset: 15, session_id: 'category-session', video_data: categoryCoverRows || [{ series_id: seriesID, series_title: '真实分类剧', series_cover: heicCover, episode_cnt: 12, vid: '2234567890123456789', tags: ['悬疑'] }], selector_rows: [] } });
@@ -122,7 +141,7 @@ https.request = function (options) {
       engagementRequests.push({ options: options, query: Object.fromEntries(parsedRequest.searchParams), body: Buffer.concat(requestChunks).toString('utf8') });
       body = engagementRequests.length === 1 ? '' : JSON.stringify({ code: 0, data: {} });
       var engagementData = {};
-      engagementData[seriesID] = { video_data: { series_id_str: seriesID, followed_cnt: 19, video_list: [{ vid: '2234567890123456789', digged_count: 7, comment_count: 4, episode_cover: 'https://example.test/episode.jpg' }] } };
+      engagementData[seriesID] = { video_data: { series_id_str: seriesID, followed_cnt: 19, content_type:'1004', video_category_type:'ai_video', category_schema:'[{"name":"都市"}]', rec_tags:[{rec_type:9,content:'9625万热度'},{rec_type:9,content:'收藏月榜 No.2'}], video_list: [{ vid: '2234567890123456789', digged_count: 7, comment_count: 4, episode_cover: 'https://example.test/episode.jpg' }] } };
       if (engagementRequests.length > 1) body = JSON.stringify({ code: 0, data: engagementData });
     }
     process.nextTick(function () {
@@ -238,6 +257,19 @@ async function run() {
     assert.strictEqual(detail.related[0].series_id, '4234567890123456789');
     assert.strictEqual(detail.reviews[0].content, '真实剧评');
     assert.strictEqual(detail.reviews[0].rating, 9);
+    var albumDetail = await provider.detail(albumFixture.data.album_data.album_id_str, '1003');
+    assert.strictEqual(albumDetail.episodes.length, 15);
+    assert.strictEqual(albumDetail.vid_list[14], '7704677415305350168');
+    assert.strictEqual(albumDetail.content_type, '1003');
+    assert.deepStrictEqual(albumRequests[0].body, { album_id: albumDetail.series_id, series_ids: [], need_video_detail_info: true, biz_param: { video_platform: 3 } });
+    assert(albumRequests[0].options.headers['X-Gorgon'], 'album directory is signed');
+
+    var recommendation = await provider.recommend({channel:'16'});
+    assert.strictEqual(recommendation.items[0].vid, '2234567890123456789', 'first episode retains its direct playback path');
+    assert.strictEqual(recommendation.items[0].rank_badge, '男频榜 No.1');
+    assert(!JSON.stringify(recommendation.items[0]).includes('sslocal://'), 'ranking schemas are not exposed');
+    assert.deepStrictEqual(recommendation.items[0].tags, ['爱情','都市爱情'], 'recommendation genre names survive normalization without ranking badges or schemas');
+    assert.strictEqual(recommendation.items[0].video_category_type, 'ai_video', 'statistics reuse recommendation content type');
 
     var category = await provider.category('/category/real-drama', 0, {}, false);
     assert.strictEqual(category.items.length, 1);
@@ -291,6 +323,8 @@ async function run() {
     assert.strictEqual(stats.favorites, 19);
     assert.strictEqual(stats.comments, 4);
     assert.strictEqual(stats.episode_cover, 'https://example.test/episode.jpg');
+    assert.strictEqual(stats.rank_badge, '收藏月榜 No.2');
+    assert.deepStrictEqual(stats.metadata, {content_type:'1004',video_category_type:'ai_video',tags:['都市']}, 'existing preload carries public classification for every playback entry');
     assert.strictEqual(engagementRequests.length, 2, 'an empty upstream response is retried');
     assert(engagementRequests[0].options.headers['X-Gorgon'] && engagementRequests[1].options.headers['X-Gorgon'], 'both attempts are signed');
     assert.notStrictEqual(engagementRequests[0].query.device_id, engagementRequests[1].query.device_id, 'retry uses a fresh device identity');
@@ -363,7 +397,7 @@ async function run() {
       resolveRange();
       var preparedRange = await Promise.all([rangePrefetch, rangeForeground]);
       assert.strictEqual(rangeOpens, 1, 'handoff shares the pending Range initialization');
-      assert.strictEqual(provider.mediaDiagnostics('').media_preparation_error_stage, 'multi_video_model', 'a late previous source cannot overwrite the latest foreground failure');
+      assert.strictEqual(provider.mediaDiagnostics('').media_preparation_error_stage, 'video_model', 'a late previous source cannot overwrite the latest foreground failure');
       assert.strictEqual(preparedRange[0].mode, 'range');
       assert.strictEqual(preparedRange[1].path, preparedRange[0].path);
       assert.strictEqual(preparedRange[1].preparation_shared, true);
@@ -392,7 +426,7 @@ async function run() {
     try {
       await assert.rejects(provider.prepare(seriesID, '9234567890123456789', '', false, 'range', false));
       var failedReport = provider.mediaDiagnostics('');
-      assert.strictEqual(failedReport.media_preparation_error_stage, 'multi_video_model');
+      assert.strictEqual(failedReport.media_preparation_error_stage, 'video_model');
       assert(Number.isFinite(failedReport.media_resolve_ms));
       assert.strictEqual(failedReport.media_range_init_ms, undefined);
       assert.strictEqual(mediaDownloadRequests, beforeFailedDownload, 'a video-model failure cannot start a full-file fallback');
@@ -467,7 +501,8 @@ async function run() {
         assert.notStrictEqual(call.query.cdid, playbackIdentity.cdid, 'the second round registers a new identity');
       }
       {
-        assert(call.options.headers['X-Medusa'], 'playback request includes its own signature');
+        assert(call.options.headers['X-Argus'], 'playback request includes its own signature');
+        assert.strictEqual(call.options.headers['X-Medusa'], undefined, 'account profile is absent');
         assert.strictEqual(call.query.ts, call.options.headers['X-Khronos']);
         assert.strictEqual(call.query._rticket, call.options.headers['X-SS-Req-Ticket']);
         var stamp = Number(call.query.ts), gorgon = Buffer.from(call.options.headers['X-Gorgon'], 'hex');
@@ -486,7 +521,7 @@ async function run() {
       assert.strictEqual(call.body.mixed_video_id_map['1004'].length, 1);
       assert(/^\d+$/.test(call.body.mixed_video_id_map['1004'][0]), 'playback request targets an exact video ID');
     });
-    assert.notStrictEqual(playbackRequests[beforePlaybackRequests].options.headers['X-Medusa'], playbackRequests[beforePlaybackRequests + 1].options.headers['X-Medusa'], 'retry signs again');
+    assert.notStrictEqual(playbackRequests[beforePlaybackRequests].options.headers['X-Argus'], playbackRequests[beforePlaybackRequests + 1].options.headers['X-Argus'], 'retry signs again');
 
     videoModelFallback = 'https://api5-normal-sinfonlineb.fqnovel.com/playback/fallback';
     fallbackResponseBody = JSON.stringify({ code: 0, video_info: { code: 0, data: { video_list: { '720': { backup_url_list: ['https://media.example.test/fallback.mp4'], codec_type: 'h264', vheight: 720, quality_desc: '720P' } }, video_duration: 91 } } });
@@ -497,6 +532,63 @@ async function run() {
     assert.strictEqual(fallbackRequests.length, 1);
     assert.strictEqual(fallbackRequests[0].options.method, 'GET');
     assert.strictEqual(fallbackRequests[0].options.headers.Cookie || '', '', 'fallback request sends no account cookies');
+
+    var beforeCodecFallback = fallbackRequests.length;
+    function codecModel(codec, id, duration) {
+      return { video_id: id || 'same-video', video_duration: duration || 90, video_list: [{ codec_type: codec, main_url: 'https://media.example.test/compatible.mp4', vheight: 1080 }] };
+    }
+    for (var scenario of ['inline', 'mixed', 'original', 'hevc', 'h264', 'bytevc1', 'mismatch-id', 'mismatch-duration', 'unusable', 'all-bytevc2']) {
+      videoModelFallback = 'https://api.fqnovel.com/playback/fallback?sig=a%2fb%2BC&same=1&same=2&codec_type=4&force_codec=old&token=x%3D';
+      videoModelInline = codecModel(scenario === 'inline' ? 'h265' : 'bytevc2');
+      if (scenario === 'mixed') videoModelInline.video_list.push(codecModel('h264').video_list[0]);
+      var calls = [];
+      var successAt = { original: 1, hevc: 2, h264: 3, bytevc1: 4, 'mismatch-id': 2, 'mismatch-duration': 2, unusable: 2 }[scenario];
+      fallbackResponseForPath = function (target) {
+        calls.push(target);
+        var candidate = codecModel('bvc2');
+        if (calls.length === successAt) candidate = codecModel(scenario === 'bytevc1' ? 'bytevc1' : 'h265');
+        if (calls.length >= 2 && scenario === 'mismatch-id') candidate.video_id = 'other-video';
+        if (calls.length >= 2 && scenario === 'mismatch-duration') candidate.video_duration = 91;
+        if (calls.length >= 2 && scenario === 'unusable') candidate.video_list[0].main_url = 'invalid';
+        return JSON.stringify({ code: 0, video_info: { code: 0, data: candidate } });
+      };
+      var probe = await provider.inspectVideoModel('1434567890123456789');
+      var expected = { inline: 0, mixed: 0, original: 1, hevc: 2, h264: 3 }[scenario];
+      assert.strictEqual(calls.length, expected == null ? 4 : expected, scenario + ' bounded request count');
+      assert.strictEqual(probe.ok, ['mismatch-id', 'mismatch-duration', 'unusable', 'all-bytevc2'].indexOf(scenario) < 0, scenario + ' result');
+      if (calls.length >= 2) assert.strictEqual(calls[1], '/playback/fallback?sig=a%2fb%2BC&same=1&same=2&token=x%3D&codec_type=1', 'raw query is preserved');
+      if (calls.length >= 3) assert.strictEqual(calls[2], '/playback/fallback?sig=a%2fb%2BC&same=1&same=2&token=x%3D&codec_type=0&force_codec=h264');
+      if (calls.length >= 4) assert.strictEqual(calls[3], '/playback/fallback?sig=a%2fb%2BC&same=1&same=2&token=x%3D&codec_type=3');
+    }
+    videoModelInline = codecModel('bytevc2');
+    fallbackResponseForPath = function () { return JSON.stringify({code:0,video_info:{code:0,data:codecModel('h265','wrong-video')}}); };
+    assert.strictEqual((await provider.inspectVideoModel('1434567890123456789')).error.code, 'VIDEO_MODEL_MISSING', 'mismatched extra fallback reaches the remaining single-model provider');
+    fallbackResponseForPath = null; fallbackStatus = 503;
+    assert.strictEqual((await provider.inspectVideoModel('1434567890123456789')).error.code, 'VIDEO_MODEL_MISSING', 'failed extra fallback reaches the remaining single-model provider');
+    fallbackStatus = 200;
+    var businessCalls = 0;
+    fallbackResponseForPath = function () {
+      businessCalls++;
+      return JSON.stringify({code:0,video_info:{code:businessCalls === 1 ? 0 : 110001,data:codecModel('bytevc2')}});
+    };
+    assert.strictEqual((await provider.inspectVideoModel('1434567890123456789')).error.code, 'FALLBACK_API_REJECTED', 'business rejection stops compatible codec probes');
+    assert.strictEqual(businessCalls, 2);
+    fallbackResponseForPath = null;
+    var urlVector = require('../../core/cmd/hongguotv/testdata/playback-url-vector.json');
+    videoModelInline = codecModel('h265'); videoModelInline.key_seed = urlVector.seed;
+    videoModelInline.video_list[0].main_url = urlVector.encoded;
+    var beforeEncryptedURL = fallbackRequests.length;
+    assert.strictEqual((await provider.inspectVideoModel('1434567890123456789')).ok, true, 'key_seed URL is decoded without a fallback request');
+    assert.strictEqual(fallbackRequests.length, beforeEncryptedURL);
+    videoModelInline.video_list[0].encrypt = true;
+    assert.strictEqual((await provider.inspectVideoModel('1434567890123456789')).ok, false, 'encrypted media with no content key cannot be accepted');
+    delete videoModelInline.video_list[0].encrypt;
+    for (var malformed of ['', '!bad', urlVector.encoded.slice(0, -8)]) {
+      videoModelInline.video_list[0].main_url = malformed;
+      assert.strictEqual((await provider.inspectVideoModel('1434567890123456789')).ok, false, 'malformed encrypted URL rejected');
+    }
+    fallbackRequests.splice(beforeCodecFallback);
+    videoModelInline = null; fallbackResponseForPath = null;
 
     videoModelFallback = 'https://api.fqnovel.com/playback/fallback';
     fallbackStatus = 302;
@@ -514,6 +606,15 @@ async function run() {
     assert.strictEqual(blockedHost.error.code, 'FALLBACK_API_BLOCKED');
     assert.strictEqual(fallbackRequests.length, 2, 'untrusted fallback URL is never requested');
     videoModelFallback = '';
+    videoModelInline = null; videoSpade = ''; videoModelStatus = 200; videoModelEmptyResponses = 0; videoTabEnabled = false;
+    var albumStart = playbackRequests.length;
+    var albumFirst = await provider.prepare(albumDetail.series_id, albumDetail.vid, '', true, 'full', false, null, '1001');
+    var albumCached = await provider.prepare(albumDetail.series_id, albumDetail.vid, '', true, 'full', false, null, '1001');
+    assert.strictEqual(albumFirst.path, albumCached.path, 'creator prefetch/foreground share their own cache');
+    assert.deepStrictEqual(playbackRequests[albumStart].body.mixed_video_id_map, { '1001': [albumDetail.vid] });
+    var defaultSource = await provider.prepare(albumDetail.series_id, albumDetail.vid, '', true, 'full', false);
+    assert.notStrictEqual(defaultSource.path, albumFirst.path, 'different content types never share cache entries');
+    assert.deepStrictEqual(playbackRequests[playbackRequests.length - 1].body.mixed_video_id_map, { '1004': [albumDetail.vid] });
     console.log('webOS provider registered playback, map-shaped video lists, safe fallback_api and registration retry: PASS');
   } finally {
     provider.closeCache();

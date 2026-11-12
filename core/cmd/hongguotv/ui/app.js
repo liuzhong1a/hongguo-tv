@@ -5,7 +5,7 @@
   // can jump from the sidebar to a right-side action just because it is close
   // on screen, which is especially confusing on a TV.
   var zoneSelectors = {
-    sidebar: '.side-item',
+    sidebar: '.side-item, .watching-return',
     channels: '.channel-tab, #core-status[tabindex="0"]',
     coreConnection: '.core-connection-action, #core-connection-scroll',
     feed: '.hero-feed-focus',
@@ -13,10 +13,15 @@
     actions: '.round-action',
     controls: '.playback-buttons .control-button, #player-retry, #player-failure-diagnostics',
     timeline: '#control-progress',
+    miniPlayer: '.mini-player-button, .mini-player-overlay input',
+    miniPlayerSettings: '.desktop-mini-titlebar-action, .windows-playback-action',
     searchInput: '#search-input',
     searchSuggestions: '.search-suggestion',
     searchActions: '.search-action',
     searchHistory: '.search-history-action',
+    searchGuesses: '.search-guess',
+    searchHotTabs: '.search-hot-tab',
+    searchHotItems: '.search-hot-item',
     searchScan: '.search-scan-action',
     searchFilters: '.search-filter, .filter-toggle',
     searchResults: '.search-result-card',
@@ -47,6 +52,7 @@
     libraryTabs: '.library-tab',
     followTabs: '.follow-tab',
     libraryActions: '.library-toolbar-button',
+    watchStatistics: '.watch-stat-action',
     historyFilters: '.history-filter',
     libraryItems: '.library-card',
     libraryRemovals: '.library-remove',
@@ -54,15 +60,18 @@
     accountKeypad: '.account-keypad-key',
     accountActions: '.account-action',
     appUpdates: '.app-update-action',
+    recommendedApps: '.recommended-app-action',
     webosUpdateNotes: '.webos-update-notes',
     localeActions: '.locale-action',
     recommendationDirection: '.recommendation-direction-action',
     sidebarDisplay: '.sidebar-display-action',
     startupPage: '.startup-page-action',
     autoCinema: '.auto-cinema-action',
+    recommendationAutoCinema: '.recommendation-auto-cinema-action',
     webosAudio: '.webos-audio-action',
     portraitBackground: '.portrait-background-action',
     danmakuRegion: '.danmaku-region-action',
+    danmakuSize: '.danmaku-size-action',
     episodePrefetch: '.episode-prefetch-action',
     playbackModes: '.playback-mode-action',
     playbackCustomDevice: '.playback-custom-device-input, .playback-custom-device-action',
@@ -142,6 +151,7 @@
     bridge: window.HongguoTVPreferences,
     render: function (data) {
       shell.classList.toggle('sidebar-icons', data.mode === 'icons');
+      renderWatchingReturn();
       document.querySelectorAll('.sidebar-display-action').forEach(function (button) {
         var selected = button.getAttribute('data-mode') === data.mode;
         button.classList.toggle('account-primary', selected);
@@ -188,6 +198,7 @@
   var autoCinemaPreferences = null;
   var autoCinemaSettingCard = document.getElementById('auto-cinema-settings');
   var autoCinemaToggle = document.getElementById('auto-cinema-toggle');
+  var recommendationAutoCinemaPreferences = null;
   var episodePrefetchSettingCard = document.getElementById('episode-prefetch-settings');
   var playbackCustomDeviceSettingCard = document.getElementById('playback-custom-device-settings');
   // The custom playback device fallback is implemented by the Go core for
@@ -215,6 +226,9 @@
   var searchScanReturnFocus = null;
   var danmakuScanReturnFocus = null;
   var searchHistory;
+  var searchDiscovery;
+  var searchDiscoveryData = { guesses: [], boards: [] };
+  var searchHotBoard = '';
   var searchHistoryEpoch = 0;
   var accountKeypadReturnFocus = null;
   var accountKeypadPhase = '';
@@ -347,6 +361,7 @@
   var libraryPage = document.getElementById('library-page');
   var accountPage = document.getElementById('account-page');
   var settingsPage = document.getElementById('settings-page');
+  var recommendedAppsPage = document.getElementById('recommended-apps-page');
   var accountData = null;
   var accountStatusInitialized = false;
   var accountQR = null;
@@ -390,6 +405,20 @@
   var confirmAfterClose = null;
   var confirmationGeneration = 0;
   var activePlayback = null;
+  var watchingReturn = window.HongguoWatchingReturn.create({
+    resumeEpisode: resumeEpisode,
+    view: {
+      wrap: document.getElementById('watching-return-wrap'), button: document.getElementById('watching-return'),
+      cover: document.getElementById('watching-return-cover'), title: document.getElementById('watching-return-title'), meta: document.getElementById('watching-return-meta'),
+      tooltip: document.getElementById('watching-return-tooltip'), tooltipTitle: document.getElementById('watching-return-tooltip-title'), tooltipMeta: document.getElementById('watching-return-tooltip-meta')
+    },
+    owner: function () { return accountEpoch; }, playbackPage: isPlaybackPage,
+    visibility: function (visible) { shell.classList.toggle('has-watching-return', visible); },
+    icons: function () { return shell.classList.contains('sidebar-icons'); },
+    bounds: function () { return { width: window.innerWidth, height: window.innerHeight }; },
+    text: uiText, clock: clockText, cover: setCover,
+    resume: function (current, target) { startPlayer(current.item, target, { watchingResume: current }); }
+  });
   var episodeCoverLoader = null;
   var prewarmedEpisodeCover = null;
   var detailCache = {};
@@ -397,6 +426,7 @@
   var playerOptionsReturn = null;
   var diagnosticEpoch = 0;
   var diagnosticRequest = null;
+  var diagnosticSampleTimer = null;
   var controlsTimer = null;
   var controlsManuallyHidden = false;
   var playbackFeedback = null;
@@ -424,6 +454,9 @@
   var playbackRecovery = HongguoPlaybackRecovery.create({ maxAttempts: 1 });
   function playbackContentType(item) {
     var value = item && item.content_type;
+    // Preserve the album's 1003 identity for details/history; its individual
+    // creator uploads are resolved with the official playback type 1001.
+    if (String(value) === '1003') return '1001';
     return /^[0-9]{1,16}$/.test(String(value || '')) ? String(value) : '';
   }
   // webOS can leave the first local Range response waiting on an upstream
@@ -455,11 +488,12 @@
     }
   });
   var applicationInBackground = false;
-  var playbackPreferences = { speed: 1, volume: 100, quality: '', danmaku: false, danmaku_region: 'current', prefetch_mode: 'full', portrait_background: 'black' };
+  var playbackPreferences = { speed: 1, volume: 100, quality: '', danmaku: false, danmaku_region: 'current', danmaku_size: 100, prefetch_mode: 'full', portrait_background: 'black' };
   var episodePrefetchSettings = null;
   var recommendationDirectionSettings = null;
   var portraitBackdrop = null;
   var endRecommendationIndex = 0, endRecommendationAnimation = 0, endRecommendationReadyCleanup = null;
+  var nextSeasonHint = typeof HongguoNextSeasonHint !== 'undefined' ? HongguoNextSeasonHint.create({ show: showNextSeasonHint, hide: hideNextSeasonHint }) : null;
   var endRecommendations = HongguoEndRecommendations.create({
     isCurrent: function (playback) {
       return !!(playback && activePlayback === playback && playback.owner === accountEpoch && playback.generation === feedGeneration &&
@@ -643,6 +677,7 @@
     if (pageMode() === 'rank') return rankPager;
     if (pageMode() === 'new') return newMode === 'calendar' ? calendarPager : newPager;
     if (pageMode() === 'follows') return followView === 'notifications' ? null : followView === 'reservations' ? reservationPager : followPager;
+    if (pageMode() === 'history' && typeof watchStatisticsView !== 'undefined' && watchStatisticsView && watchStatisticsView.isOpen()) return null;
     if (isLibraryPage()) return libraryPager;
     return null;
   }
@@ -652,6 +687,9 @@
   function checkListTail() {
     var pager = visiblePager();
     if (!pager || !pager.loaded || pager.busy || pager.error || !pager.hasMore()) return;
+    // Hidden subpages have zero-sized cards, which look like a visible tail.
+    // Never drain their remaining pages while another view owns the screen.
+    if (!pager.container.getClientRects().length) return;
     var cards = pager.container.querySelectorAll(pager.selector);
     var last = cards[cards.length - 1];
     if (!last) { pager.load(); return; }
@@ -864,6 +902,12 @@
   function normalizeDanmakuRegion(value) {
     return value === 'half' || value === 'quarter' ? value : 'current';
   }
+  function normalizeDanmakuSize(value) {
+    return [100, 125, 150, 175, 200].indexOf(value) >= 0 ? value : 100;
+  }
+  function danmakuFontSize() {
+    return 22 * normalizeDanmakuSize(playbackPreferences.danmaku_size) / 100;
+  }
   function applyDanmakuRegion() {
     var layer = document.getElementById('danmaku-layer');
     if (!layer) return;
@@ -872,10 +916,30 @@
     if (playbackPreferences.danmaku_region === 'quarter') layer.classList.add('is-region-quarter');
   }
   function danmakuLaneLayout(layer) {
-    var height = Math.max(22, Number(layer.clientHeight) || 22);
+    var font = danmakuFontSize();
+    var height = Math.max(0, Number(layer.clientHeight) || 0);
+    // Reserve room for the line box, emoji descenders and shadow. Scale the
+    // existing 38px lane spacing without measuring every emitted comment.
+    var occupied = Math.ceil(font * 1.6);
+    var step = Math.ceil(38 * font / 22);
     var maximum = playbackPreferences.danmaku_region === 'half' ? 6 : 4;
-    var lanes = Math.max(1, Math.min(maximum, Math.floor((height - 22) / 38) + 1));
-    return { count: lanes, step: 38 };
+    var lanes = Math.max(0, Math.min(maximum, Math.floor((height - occupied) / step) + 1));
+    return { count: lanes, step: step, font: font };
+  }
+  function availableDanmakuLane(layer, layout) {
+    // At most eight live comments are checked, only when a comment is due
+    // and the existing 700ms emission throttle allows it. Keep CSS motion;
+    // do not introduce a frame loop or change playback timing.
+    var blocked = [], edge = layer.getBoundingClientRect().right - Math.max(12, layout.font / 2);
+    for (var i = 0; i < layer.children.length; i += 1) {
+      var line = layer.children[i];
+      if (line.getBoundingClientRect().right > edge) blocked[Math.round(parseFloat(line.style.top) / layout.step)] = true;
+    }
+    for (var offset = 0; offset < layout.count; offset += 1) {
+      var lane = (danmakuLane + offset) % layout.count;
+      if (!blocked[lane]) return lane;
+    }
+    return -1;
   }
   function resetDanmaku() {
     ++danmakuGeneration; if (danmakuRequest) danmakuRequest.abort(); danmakuRequest = null;
@@ -916,11 +980,18 @@
     }
     var layer = document.getElementById('danmaku-layer'); var last = danmakuLast;
     var layout = danmakuLaneLayout(layer);
+    if (!layout.count) return;
+    var lane = -2;
     danmakuRows.forEach(function (item) {
       if (item.shown || item.offset_ms > now || now - last < 700 || layer.children.length >= 8) return;
+      if (item.offset_ms < now - 2000) { item.shown = true; return; }
+      if (lane === -2) lane = availableDanmakuLane(layer, layout);
+      if (lane < 0) return;
       item.shown = true; last = now; danmakuLast = now;
-      if (item.offset_ms < now - 2000) return;
-      var line = document.createElement('span'); line.className = 'danmaku-line'; line.textContent = item.text.slice(0, 120); line.style.top = (danmakuLane++ % layout.count) * layout.step + 'px';
+      var line = HongguoDanmakuContent.createLine(document, item, HongguoEngagement.countText);
+      line.style.fontSize = layout.font + 'px';
+      line.style.top = lane * layout.step + 'px';
+      danmakuLane = lane + 1;
       line.addEventListener('animationend', function () { line.remove(); }); layer.appendChild(line);
     });
   }
@@ -1073,7 +1144,6 @@
     var result = [];
     var query = selector || Object.keys(zoneSelectors).map(function (zone) { return zoneSelectors[zone]; }).join(',');
     Array.prototype.forEach.call(document.querySelectorAll(query), function (element) {
-      var style = window.getComputedStyle(element);
       var insideModal = element.closest && element.closest('#detail-modal');
       if (coreConnectionModalOpen) { if (!element.closest('#core-connection-modal')) return; }
       else if (scanModalOpen()) { if (!element.closest('#search-scan-modal')) return; }
@@ -1092,8 +1162,12 @@
       else if (element.closest('#end-recommendations')) return;
       else if (element.closest('#discussion-panel')) return;
       else if (detailModalOpen ? !insideModal : insideModal) return;
+      // Cached pages can contain hundreds of hidden cards. Discard them
+      // before resolving computed styles on every remote focus check.
+      if (element.disabled) return;
       if (!element.getClientRects || !element.getClientRects().length) return;
-      if (!element.disabled && style.display !== 'none' && style.visibility !== 'hidden') result.push(element);
+      var style = window.getComputedStyle(element);
+      if (style.display !== 'none' && style.visibility !== 'hidden') result.push(element);
     });
     return result;
   }
@@ -1141,18 +1215,23 @@
 
   function zoneOf(element) {
     if (!element) return '';
+    if (element.closest && element.closest('.mini-player-overlay')) return 'miniPlayer';
     if (element.id === 'core-connection-scroll' || element.classList.contains('core-connection-action')) return 'coreConnection';
     if (element.id === 'core-status') return 'channels';
     if (element.classList.contains('end-recommendation-card') || element.id === 'end-recommendations-close') return 'endRecommendations';
     if (element.classList.contains('search-scan-action')) return 'searchScan';
     if (element.classList.contains('search-history-action')) return 'searchHistory';
+    if (element.classList.contains('search-guess')) return 'searchGuesses';
+    if (element.classList.contains('search-hot-tab')) return 'searchHotTabs';
+    if (element.classList.contains('search-hot-item')) return 'searchHotItems';
     if (element.classList.contains('search-suggestion')) return 'searchSuggestions';
     if (element.classList.contains('account-keypad-key')) return 'accountKeypad';
     if (element.classList.contains('account-country-button')) return 'accountCountry';
     if (element.classList.contains('account-country-item') || element.classList.contains('account-country-close')) return 'accountCountryItems';
     if (element.classList.contains('support-card') || element.classList.contains('support-close')) return 'support';
+    if (element.classList.contains('recommended-app-action')) return 'recommendedApps';
     if (element.classList.contains('discussion-item') || element.classList.contains('discussion-close')) return 'discussion';
-    if (element.classList.contains('side-item')) return 'sidebar';
+    if (element.classList.contains('side-item') || element.classList.contains('watching-return')) return 'sidebar';
     if (element.classList.contains('channel-tab')) return 'channels';
     if (element.classList.contains('hero-feed-focus')) return 'feed';
     if (element.classList.contains('catalog-card')) return 'catalog';
@@ -1193,6 +1272,7 @@
     // Follow controls share the toolbar styling, but have their own focus graph.
     if (element.classList.contains('follow-action')) return 'followActions';
     if (element.classList.contains('follow-notification-action')) return 'followNotifications';
+    if (element.classList.contains('watch-stat-action')) return 'watchStatistics';
     if (element.classList.contains('library-toolbar-button')) return 'libraryActions';
     if (element.classList.contains('history-filter')) return 'historyFilters';
     if (element.classList.contains('library-card')) return 'libraryItems';
@@ -1200,15 +1280,18 @@
     if (element.classList.contains('playback-custom-device-input') || element.classList.contains('playback-custom-device-action')) return 'playbackCustomDevice';
     if (element.classList.contains('account-input')) return 'accountInputs';
     if (element.classList.contains('app-update-action')) return 'appUpdates';
+    if (element.classList.contains('desktop-mini-titlebar-action') || element.classList.contains('windows-playback-action')) return 'miniPlayerSettings';
     if (element.classList.contains('webos-update-notes')) return 'webosUpdateNotes';
     if (element.classList.contains('locale-action')) return 'localeActions';
     if (element.classList.contains('recommendation-direction-action')) return 'recommendationDirection';
     if (element.classList.contains('sidebar-display-action')) return 'sidebarDisplay';
     if (element.classList.contains('startup-page-action')) return 'startupPage';
     if (element.classList.contains('auto-cinema-action')) return 'autoCinema';
+    if (element.classList.contains('recommendation-auto-cinema-action')) return 'recommendationAutoCinema';
     if (element.classList.contains('webos-audio-action')) return 'webosAudio';
     if (element.classList.contains('portrait-background-action')) return 'portraitBackground';
     if (element.classList.contains('danmaku-region-action')) return 'danmakuRegion';
+    if (element.classList.contains('danmaku-size-action')) return 'danmakuSize';
     if (element.classList.contains('episode-prefetch-action')) return 'episodePrefetch';
     if (element.classList.contains('playback-mode-action')) return 'playbackModes';
     if (element.classList.contains('account-action')) return 'accountActions';
@@ -1250,6 +1333,15 @@
     element.focus();
     markFocus(element);
     if (zoneOf(element) === 'sidebar') revealSidebarFocus(element);
+    else if (element.classList.contains('watch-stat-action')) {
+      var preferencePanel = element.hasAttribute('data-stat-kind') && element.closest('.watch-stat-preferences');
+      // Enter the lower panel with its list visible when it fits the workspace.
+      revealSidebarFocus(preferencePanel && preferencePanel.offsetHeight <= libraryPage.clientHeight - 12 ? preferencePanel : element);
+    }
+    else if (element.classList.contains('recommended-app-action')) {
+      var appCard = element.closest('.recommended-app-card');
+      revealSidebarFocus(appCard && appCard.offsetHeight <= recommendedAppsPage.clientHeight - 12 ? appCard : element);
+    }
     // Older WebViews may focus an action without scrolling its workspace.
     if ((pageMode() === 'account' || pageMode() === 'settings') && element.closest &&
         element.closest(pageMode() === 'settings' ? '#settings-page' : '#account-page')) {
@@ -1268,6 +1360,7 @@
   }
 
   function firstContentFocus() {
+    if (pageMode() === 'history' && typeof watchStatisticsView !== 'undefined' && watchStatisticsView && watchStatisticsView.isOpen()) return firstVisible('[data-stat-back]');
     if (pageMode() === 'player') return document.querySelector('.hero-feed-focus');
     // Restored recommendations are already visible; enter the channel bar
     // explicitly instead of relying on the loading placeholder.
@@ -1284,6 +1377,7 @@
     if (pageMode() === 'account') return firstVisible('#account-method-qr[aria-pressed="true"]') || firstVisible('#account-method-phone') || firstVisible('.account-input') || firstVisible('.account-action');
     if (pageMode() === 'settings') return selectedSidebarDisplay() || selectedLocale() || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.auto-cinema-action') || firstVisible('.webos-audio-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action') || activeSidebar();
     if (pageMode() === 'support') return firstVisible('.support-card');
+    if (pageMode() === 'apps') return firstVisible('.recommended-app-action') || activeSidebar();
     if (isLibraryPage()) return firstVisible('.library-card') || firstVisible('.history-filter.is-active') || firstVisible('[data-action="library-discover"]') || firstVisible('.library-toolbar-button');
     if (pageMode() === 'new') return firstVisible('.new-tab.is-active') || firstNewTab();
     if (pageMode() === 'follows') return firstVisible('.follow-tab.is-active') || firstVisible('.follow-tab');
@@ -1320,6 +1414,18 @@
     return firstVisible('.search-submit') || firstVisible('#search-scan');
   }
 
+  function firstSearchDiscovery() {
+    return firstVisible('.search-guess') || firstVisible('.search-hot-tab.is-active') || firstVisible('.search-hot-item');
+  }
+
+  function lastSearchDiscovery() {
+    var rows = focusables('.search-hot-item');
+    return rows[rows.length - 1] || firstVisible('.search-hot-tab.is-active') || firstVisible('.search-guess');
+  }
+
+  function aboveSearchDiscovery() { return firstVisible('.search-history-action') || firstSearchAction() || searchInput; }
+  function belowSearchDiscovery() { return firstSearchFilter() || firstSearchResult() || firstVisible('#search-pagination .list-retry') || firstSearchAction(); }
+
   function firstSearchResult() {
     return firstVisible('.search-result-card');
   }
@@ -1345,14 +1451,15 @@
   function firstCalendarRow() { return firstVisible('.calendar-row'); }
 
   function hideWorkspacePages() {
-    [rankPage, newPage, followPage, libraryPage, accountPage, settingsPage, supportPage].forEach(function (page) {
+    if (typeof recommendedApps !== 'undefined' && recommendedApps) recommendedApps.hide();
+    [rankPage, newPage, followPage, libraryPage, accountPage, settingsPage, supportPage, recommendedAppsPage].forEach(function (page) {
       if (page) page.classList.add('is-hidden');
     });
   }
 
   function moveSearchFilter(current, direction) {
     if (current && current.id === 'filter-toggle') {
-      if (direction === 'up') return firstSearchAction() || searchInput;
+      if (direction === 'up') return lastSearchDiscovery() || aboveSearchDiscovery();
       if (direction === 'down') return document.getElementById('filter-panel').classList.contains('is-collapsed') ? firstSearchResult() || firstVisible('#search-pagination .list-retry') : firstVisible('.search-filter');
       if (direction === 'left') return activeSidebar();
       return null;
@@ -1536,6 +1643,11 @@
       if (direction === 'left' || direction === 'right') return moveWithinZone('support', current, direction) || (direction === 'left' ? activeSidebar() : null);
       return direction === 'up' ? activeSidebar() : null;
     }
+    if (zone === 'recommendedApps') {
+      if (direction === 'left') return activeSidebar();
+      if (direction === 'up' || direction === 'down') return moveWithinZone(zone, current, direction) || (direction === 'up' ? activeSidebar() : null);
+      return null;
+    }
     if (zone === 'sidebar') {
       if (direction === 'up' || direction === 'down') return moveWithinZone(zone, current, direction);
       if (direction === 'right') return firstContentFocus();
@@ -1610,13 +1722,33 @@
     if (zone === 'searchActions') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? searchInput : null);
       if (direction === 'up') return searchInput;
-      if (direction === 'down') return firstVisible('.search-history-action') || firstSearchFilter() || firstSearchResult() || firstVisible('#search-pagination .list-retry');
+      if (direction === 'down') return firstVisible('.search-history-action') || firstSearchDiscovery() || firstSearchFilter() || firstSearchResult() || firstVisible('#search-pagination .list-retry');
       return null;
     }
     if (zone === 'searchHistory') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
       if (direction === 'up') return firstSearchAction() || searchInput;
-      if (direction === 'down') return firstSearchFilter() || firstSearchResult() || firstVisible('#search-page .list-retry') || firstSearchAction();
+      if (direction === 'down') return firstSearchDiscovery() || firstSearchFilter() || firstSearchResult() || firstVisible('#search-page .list-retry') || firstSearchAction();
+      return null;
+    }
+    if (zone === 'searchGuesses') {
+      if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
+      if (direction === 'up') return aboveSearchDiscovery();
+      if (direction === 'down') return firstVisible('.search-hot-tab.is-active') || firstVisible('.search-hot-item') || belowSearchDiscovery();
+      return null;
+    }
+    if (zone === 'searchHotTabs') {
+      if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
+      if (direction === 'up') return firstVisible('.search-guess') || aboveSearchDiscovery();
+      if (direction === 'down') return firstVisible('.search-hot-item') || belowSearchDiscovery();
+      return null;
+    }
+    if (zone === 'searchHotItems') {
+      var hotTarget = moveGrid('.search-hot-item', current, direction);
+      if (hotTarget) return hotTarget;
+      if (direction === 'up') return firstVisible('.search-hot-tab.is-active') || aboveSearchDiscovery();
+      if (direction === 'down') return belowSearchDiscovery();
+      if (direction === 'left') return activeSidebar();
       return null;
     }
     if (zone === 'searchFilters') {
@@ -1627,7 +1759,7 @@
         var resultTarget = moveGrid('.search-result-card', current, direction);
         return resultTarget || (direction === 'left' ? activeSidebar() : null);
       }
-      if (direction === 'up') return moveGrid('.search-result-card', current, direction) || lastSearchFilter() || firstVisible('.search-history-action') || searchInput;
+      if (direction === 'up') return moveGrid('.search-result-card', current, direction) || lastSearchFilter() || lastSearchDiscovery() || firstVisible('.search-history-action') || searchInput;
       if (direction === 'down') return moveGrid('.search-result-card', current, direction) || listBoundary(searchPager, current, direction);
       return null;
     }
@@ -1672,6 +1804,40 @@
       if (direction === 'right') return current.querySelector('.publication-action');
       if (direction === 'left') return activeSidebar();
       return null;
+    }
+    if (zone === 'watchStatistics') {
+      if (current.hasAttribute('data-stat-back')) {
+        if (direction === 'left') return activeSidebar();
+        if (direction === 'right') return firstVisible('[data-stat-reset]');
+        if (direction === 'down') return firstVisible('[data-stat-retry]') || firstVisible('[data-stat-day][aria-pressed="true"]') || firstVisible('[data-stat-kind]');
+        return null;
+      }
+      if (current.hasAttribute('data-stat-reset')) {
+        if (direction === 'left') return firstVisible('[data-stat-back]');
+        if (direction === 'down') return firstVisible('[data-stat-retry]') || firstVisible('[data-stat-day][aria-pressed="true"]') || firstVisible('[data-stat-kind][aria-pressed="true"]');
+        return null;
+      }
+      if (current.hasAttribute('data-stat-day')) {
+        if (direction === 'up') return firstVisible('[data-stat-back]');
+        if (direction === 'down') return firstVisible('[data-stat-kind][aria-pressed="true"]');
+        var days = focusables('[data-stat-day]'), dayIndex = days.indexOf(current);
+        return days[dayIndex + (direction === 'left' ? -1 : 1)] || (direction === 'left' ? activeSidebar() : null);
+      }
+      if (current.hasAttribute('data-stat-kind')) {
+        if (direction === 'up') return firstVisible('[data-stat-day][aria-pressed="true"]') || firstVisible('[data-stat-back]');
+        if (direction === 'down') return firstVisible('[data-stat-preference]');
+        if (direction === 'left') return current.dataset.statKind === 'genres' ? firstVisible('[data-stat-kind="types"]') : activeSidebar();
+        if (direction === 'right') return firstVisible('[data-stat-kind="genres"]');
+        return null;
+      }
+      if (current.hasAttribute('data-stat-preference')) {
+        var preferenceTarget = moveGrid('[data-stat-preference]', current, direction);
+        if (preferenceTarget) return preferenceTarget;
+        if (direction === 'up') return firstVisible('[data-stat-kind][aria-pressed="true"]');
+        if (direction === 'left') return activeSidebar();
+        return null;
+      }
+      return direction === 'up' ? firstVisible('[data-stat-back]') : direction === 'left' ? activeSidebar() : null;
     }
     if (zone === 'libraryActions') {
       if (current.dataset.action === 'library-discover' && direction === 'up') return firstVisible('.history-filter.is-active') || firstVisible('.library-tab.is-active') || activeSidebar();
@@ -1731,25 +1897,31 @@
     if (zone === 'startupPage') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
       if (direction === 'up') return selectedSidebarDisplay() || activeSidebar();
-      if (direction === 'down') return firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.auto-cinema-action') || firstVisible('.webos-audio-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
+      if (direction === 'down') return firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.auto-cinema-action') || firstVisible('.webos-audio-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
       return null;
     }
     if (zone === 'localeActions') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
       if (direction === 'up') return firstVisible('.startup-page-action[aria-pressed="true"]') || firstVisible('.startup-page-action') || selectedSidebarDisplay() || activeSidebar();
-      if (direction === 'down') return firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.auto-cinema-action') || firstVisible('.webos-audio-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
+      if (direction === 'down') return firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.auto-cinema-action') || firstVisible('.webos-audio-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
       return null;
     }
     if (zone === 'recommendationDirection') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
       if (direction === 'up') return firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || selectedSidebarDisplay() || activeSidebar();
-      if (direction === 'down') return firstVisible('.auto-cinema-action') || firstVisible('.webos-audio-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
+      if (direction === 'down') return firstVisible('.auto-cinema-action') || firstVisible('.webos-audio-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
       return null;
     }
     if (zone === 'appUpdates') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
-      if (direction === 'up') return firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.webos-audio-action') || firstVisible('.auto-cinema-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || selectedSidebarDisplay() || activeSidebar();
+      if (direction === 'up') return firstVisible('.desktop-mini-titlebar-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.webos-audio-action') || firstVisible('.auto-cinema-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || selectedSidebarDisplay() || activeSidebar();
       if (direction === 'down') return firstVisible('.webos-update-notes');
+      return null;
+    }
+    if (zone === 'miniPlayerSettings') {
+      if (direction === 'left') return activeSidebar();
+      if (direction === 'up') return firstVisible('.playback-custom-device-action') || firstVisible('.playback-mode-action') || activeSidebar();
+      if (direction === 'down') return firstVisible('#app-check-update');
       return null;
     }
     if (zone === 'webosUpdateNotes') {
@@ -1760,43 +1932,58 @@
     if (zone === 'autoCinema') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
       if (direction === 'up') return firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || selectedSidebarDisplay() || activeSidebar();
-      if (direction === 'down') return firstVisible('.webos-audio-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
+      if (direction === 'down' && firstVisible('.recommendation-auto-cinema-action')) return firstVisible('.recommendation-auto-cinema-action');
+      if (direction === 'down') return firstVisible('.webos-audio-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
+      return null;
+    }
+    if (zone === 'recommendationAutoCinema') {
+      if (direction === 'left') return activeSidebar();
+      if (direction === 'up') return firstVisible('.auto-cinema-action') || activeSidebar();
+      if (direction === 'down') return firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
       return null;
     }
     if (zone === 'webosAudio') {
       if (direction === 'left') return activeSidebar();
       if (direction === 'up') return firstVisible('.auto-cinema-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.locale-action[aria-pressed="true"]') || selectedSidebarDisplay() || activeSidebar();
-      if (direction === 'down') return firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
+      if (direction === 'down') return firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
       return null;
     }
     if (zone === 'portraitBackground') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
+      if (direction === 'up' && firstVisible('.recommendation-auto-cinema-action')) return firstVisible('.recommendation-auto-cinema-action');
       if (direction === 'up') return firstVisible('.webos-audio-action') || firstVisible('.auto-cinema-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || selectedSidebarDisplay() || activeSidebar();
-      if (direction === 'down') return firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
+      if (direction === 'down') return firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
       return null;
     }
     if (zone === 'danmakuRegion') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
+      if (direction === 'up' && !firstVisible('.portrait-background-action') && firstVisible('.recommendation-auto-cinema-action')) return firstVisible('.recommendation-auto-cinema-action');
       if (direction === 'up') return firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.webos-audio-action') || firstVisible('.auto-cinema-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || selectedSidebarDisplay() || activeSidebar();
-      if (direction === 'down') return firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
+      if (direction === 'down') return firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
+      return null;
+    }
+    if (zone === 'danmakuSize') {
+      if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
+      if (direction === 'up') return moveGrid('.danmaku-size-action', current, direction) || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || activeSidebar();
+      if (direction === 'down') return moveGrid('.danmaku-size-action', current, direction) || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
       return null;
     }
     if (zone === 'episodePrefetch') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
-      if (direction === 'up') return firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.webos-audio-action') || firstVisible('.auto-cinema-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || selectedSidebarDisplay() || activeSidebar();
+      if (direction === 'up') return firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.webos-audio-action') || firstVisible('.auto-cinema-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || selectedSidebarDisplay() || activeSidebar();
       if (direction === 'down') return firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
       return null;
     }
     if (zone === 'playbackModes') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
-      if (direction === 'up') return firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.webos-audio-action') || firstVisible('.auto-cinema-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || selectedSidebarDisplay() || activeSidebar();
+      if (direction === 'up') return firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.danmaku-region-action[aria-pressed="true"]') || firstVisible('.danmaku-region-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.webos-audio-action') || firstVisible('.auto-cinema-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || selectedSidebarDisplay() || activeSidebar();
       if (direction === 'down') return firstVisible('.playback-custom-device-input') || firstVisible('.playback-custom-device-action') || firstVisible('.app-update-action');
       return null;
     }
     if (zone === 'playbackCustomDevice') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
-      if (direction === 'up') return firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action');
-      if (direction === 'down') return firstVisible('.app-update-action');
+      if (direction === 'up') return firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.danmaku-size-action[aria-pressed="true"]') || firstVisible('.danmaku-size-action') || firstVisible('.danmaku-region-action');
+      if (direction === 'down') return firstVisible('.desktop-mini-titlebar-action') || firstVisible('.app-update-action');
       return null;
     }
     if (zone === 'accountInputs' || zone === 'accountActions') {
@@ -2087,6 +2274,7 @@
 
   function handleKey(event) {
     var key = normalizedKey(event);
+    if (typeof desktopShell !== 'undefined' && desktopShell && window.HongguoDesktopMini && window.HongguoDesktopMini.handleKey(event, key, goFocus)) return;
     if (searchSuggestionActivation && (key === 'Enter' || key === 'Escape')) {
       if (key === 'Escape') handleBack();
       event.preventDefault(); event.stopPropagation(); return;
@@ -2221,7 +2409,8 @@
 
   function switchPlayerEpisode(step, fromWheel) {
     var playerMode = pageMode() === 'player';
-    var fullscreenRecommendation = pageMode() === 'recommend' && shell.classList.contains('is-cinema');
+    var fullscreenRecommendation = pageMode() === 'recommend' && (shell.classList.contains('is-cinema') ||
+      typeof desktopShell !== 'undefined' && desktopShell && window.HongguoDesktopMini && window.HongguoDesktopMini.isActive());
     if ((!playerMode && !fullscreenRecommendation) || (!fromWheel && zoneOf(document.activeElement) !== 'feed') ||
       detailModalOpen || (typeof actorWorksOpen !== 'undefined' && actorWorksOpen) || playerOptionsOpen || confirmOpen || discussionOpen) return false;
     step = Number(step);
@@ -2530,8 +2719,29 @@
   function hideControls() {
     clearTimeout(controlsTimer);
     if (!isPlaybackPage() || (typeof playbackCommandMenuOpen !== 'undefined' && playbackCommandMenuOpen) || detailModalOpen || (typeof actorWorksOpen !== 'undefined' && actorWorksOpen) || confirmOpen || playerOptionsOpen || discussionOpen || zoneOf(document.activeElement) === 'sidebar') return;
+    var wasHidden = shell.classList.contains('is-controls-hidden');
     shell.classList.add('is-controls-hidden');
     goFocus(document.getElementById('hero-feed-focus'));
+    if (!wasHidden) enterRecommendationCinemaOnClear();
+  }
+  function enterRecommendationCinemaOnClear() {
+    if (!recommendationAutoCinemaPreferences || !recommendationAutoCinemaPreferences.enabled() ||
+        pageMode() !== 'recommend' || shell.classList.contains('is-cinema') ||
+        applicationInBackground || applicationHidden() || coreConnectionModalOpen ||
+        scanModalOpen() || supportModalOpen || accountCountryModalOpen || accountKeypadOpen() ||
+        detailModalOpen || actorWorksOpen || detailCastOpen || rankFilterOpen || confirmOpen ||
+        playerOptionsOpen || playbackCommandMenuOpen || discussionOpen ||
+        endRecommendations && endRecommendations.isOpen()) return;
+    var video = document.getElementById('hero-video');
+    var menuHint = document.getElementById('playback-menu-hint');
+    if (document.activeElement !== document.getElementById('hero-feed-focus') ||
+        !video || video.paused || video.ended || !activePlayback || activePlayback.continuationPending ||
+        !playbackVideoReady(activePlayback, activePlayback.presentation, video) ||
+        document.getElementById('hero').classList.contains('is-preparing-video') ||
+        menuHint && !menuHint.classList.contains('is-hidden')) return;
+    // Reuse the existing fullscreen layout and native bounds synchronization.
+    // Keep the clear-screen state; revealing controls would arm another timer.
+    setCinema(true);
   }
   function clearPrefetchedEpisodeHint() {
     if (prefetchedEpisodeHint) clearTimeout(prefetchedEpisodeHint.timer);
@@ -2705,6 +2915,7 @@
       playbackPreferences.prefetch_mode = HongguoEpisodePrefetchSettings.normalize(saved.prefetch_mode);
       playbackPreferences.portrait_background = saved.portrait_background === 'blur' ? 'blur' : 'black';
       playbackPreferences.danmaku_region = normalizeDanmakuRegion(saved.danmaku_region);
+      playbackPreferences.danmaku_size = normalizeDanmakuSize(saved.danmaku_size);
       danmakuEnabled = saved.danmaku === true; playbackPreferences.danmaku = danmakuEnabled;
     } catch (error) { /* Invalid preferences fall back to normal playback. */ }
     var fullPrefetchSupported = typeof HongguoEpisodePrefetchSettings !== 'undefined' && HongguoEpisodePrefetchSettings &&
@@ -2730,6 +2941,7 @@
   }
   function cancelDiagnosticRead() {
     ++diagnosticEpoch;
+    clearTimeout(diagnosticSampleTimer); diagnosticSampleTimer = null;
     if (diagnosticRequest) diagnosticRequest.abort();
     diagnosticRequest = null;
   }
@@ -2809,7 +3021,20 @@
     } catch (error) {
       report = diagnosticFallbackReport(snapshot, error);
     }
-    document.getElementById('player-diagnostics-summary').textContent = report.summary;
+    var guide = report.guidance || { title: report.summary, state: 'unknown',
+      suggestions: [uiText('diagnostic.guide.refreshAction')], evidence: [uiText('diagnostic.guide.unknownEvidence')] };
+    var guideState = ['attention', 'unknown', 'pending', 'ok'].indexOf(guide.state) >= 0 ? guide.state : 'unknown';
+    document.getElementById('player-diagnostics-guidance').className = 'diagnostic-guidance is-' + guideState;
+    document.getElementById('player-diagnostics-state').textContent = uiText('diagnostic.guide.' + guideState);
+    document.getElementById('player-diagnostics-summary').textContent = guide.title;
+    var suggestions = document.getElementById('player-diagnostics-suggestions'); suggestions.innerHTML = '';
+    guide.suggestions.forEach(function (suggestion) {
+      var item = document.createElement('li'); item.textContent = suggestion; suggestions.appendChild(item);
+    });
+    var evidence = document.getElementById('player-diagnostics-evidence'); evidence.innerHTML = '';
+    guide.evidence.forEach(function (value) {
+      var line = document.createElement('p'); line.textContent = value; evidence.appendChild(line);
+    });
     var rows = document.getElementById('player-diagnostics-rows'); rows.innerHTML = '';
     report.rows.forEach(function (item) {
       var row = document.createElement('div'); row.className = 'diagnostic-row' + (item.wide ? ' diagnostic-row-wide' : '');
@@ -2847,6 +3072,8 @@
     var contextGeneration = feedGeneration, contextOwner = accountEpoch, contextPlayback = activePlayback;
     var device = desktopShell ? { app_version: window.HongguoDesktop.version } : {};
     try { if (window.HongguoTVDiagnostics) device = JSON.parse(window.HongguoTVDiagnostics.readDevice()); } catch (ignored) {}
+    var sampleRequested = false, adapter = window.HongguoNativePlaybackAdapter;
+    try { if (adapter && adapter.requestDiagnosticSample) sampleRequested = adapter.requestDiagnosticSample(); } catch (ignoredSample) {}
     var playerDiagnostics = readCurrentPlaybackDiagnostics(video);
     var native = playerDiagnostics.native, playbackRoute = playerDiagnostics.route;
     // native-player.js replaces getElementById('hero-video') with a media
@@ -2896,6 +3123,35 @@
         videoVisible: style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity) > 0,
         background: applicationInBackground || applicationHidden() }
     };
+    function sameDiagnosticContext(currentPlayers) {
+      return epoch === diagnosticEpoch && playerOptionsOpen &&
+        contextGeneration === feedGeneration && contextOwner === accountEpoch && contextPlayback === activePlayback &&
+        presentation === (activePlayback && activePlayback.presentation) &&
+        snapshot.preparationError === (activePlayback && activePlayback.generation === feedGeneration && activePlayback.owner === accountEpoch ? activePlayback.preparationError : null) &&
+        (native || {}).diagnostic_id === (currentPlayers.native || {}).diagnostic_id &&
+        (playbackRoute || {}).active_path === (currentPlayers.route || {}).active_path;
+    }
+    // Only user-opened MPV diagnostics perform this bounded local snapshot read.
+    // Keep the same snapshot object so a late core response cannot restore the
+    // earlier, incomplete native fields. No source fetch or playback changes.
+    if (sampleRequested && native.engine === 'mpv' && native.hwdec_current === 'mediacodec-copy') {
+      var sampleReads = 0;
+      var samplePending = !native.mediacodec_capture_requested && !native.mediacodec_copy_layout_available;
+      snapshot.native.mediacodec_capture_pending = samplePending;
+      diagnosticSampleTimer = setTimeout(function readSample() {
+        diagnosticSampleTimer = null;
+        if (epoch !== diagnosticEpoch || !playerOptionsOpen) return;
+        var players = readCurrentPlaybackDiagnostics(video);
+        if (!sameDiagnosticContext(players)) { refreshPlaybackDiagnostics(); return; }
+        ++sampleReads;
+        snapshot.native = players.native;
+        var pending = !snapshot.native.mediacodec_capture_requested && !snapshot.native.mediacodec_copy_layout_available;
+        snapshot.native.mediacodec_capture_pending = pending && sampleReads < 10;
+        renderPlaybackDiagnostics(snapshot);
+        if (sampleReads < 10 && (pending || snapshot.native.mediacodec_capture_active))
+          diagnosticSampleTimer = setTimeout(readSample, 250);
+      }, 250);
+    }
     renderPlaybackDiagnostics(snapshot);
     // Read local status only. webOS can still hold the previous src while the
     // next episode is preparing; query the current foreground job in that case.
@@ -2909,14 +3165,13 @@
       if (epoch !== diagnosticEpoch || diagnosticRequest !== request || !playerOptionsOpen) return;
       diagnosticRequest = null;
       var currentPlayers = readCurrentPlaybackDiagnostics(video);
-      if (contextGeneration !== feedGeneration || contextOwner !== accountEpoch || contextPlayback !== activePlayback ||
-          presentation !== (activePlayback && activePlayback.presentation) ||
-          snapshot.preparationError !== (activePlayback && activePlayback.generation === feedGeneration && activePlayback.owner === accountEpoch ? activePlayback.preparationError : null) ||
-          (native || {}).diagnostic_id !== (currentPlayers.native || {}).diagnostic_id ||
-          (playbackRoute || {}).active_path !== (currentPlayers.route || {}).active_path) {
+      if (!sameDiagnosticContext(currentPlayers)) {
         refreshPlaybackDiagnostics();
         return;
       }
+      currentPlayers.native.mediacodec_capture_pending = snapshot.native.mediacodec_capture_pending &&
+        !currentPlayers.native.mediacodec_capture_requested && !currentPlayers.native.mediacodec_copy_layout_available;
+      snapshot.native = currentPlayers.native;
       snapshot.core = core; renderPlaybackDiagnostics(snapshot);
     }
     request.onload = function () {
@@ -3089,6 +3344,7 @@
   }
   function setCinema(enabled) {
     shell.classList.toggle('is-cinema', enabled);
+    if (!enabled && typeof nextSeasonHint !== 'undefined' && nextSeasonHint) nextSeasonHint.reset();
     updatePlaybackControls();
     // CSS cinema mode does not resize the Android WebView. Read the new
     // layout explicitly, including after the browser fullscreen callback.
@@ -3140,6 +3396,7 @@
   function desktopFullscreenChanged(enabled) {
     if (!desktopShell) return;
     nativeFullscreen = !!enabled;
+    if (window.HongguoDesktopMini && (window.HongguoDesktopMini.isActive() || window.HongguoDesktopMini.isPending())) return;
     setCinema(enabled);
     if (!enabled && fullscreenExitKeepsHidden) hideControls();
     fullscreenExitKeepsHidden = false;
@@ -3166,6 +3423,7 @@
     else if (playerOptionsOpen) closePlayerOptions();
     else if (detailModalOpen) closeDetail();
     else if (discussionOpen) closeDiscussion();
+    else if (pageMode() === 'history' && typeof watchStatisticsView !== 'undefined' && watchStatisticsView && watchStatisticsView.isOpen()) closeWatchStatistics();
     else if (pageMode() === 'account' && accountQR && accountQR.snapshot().active) { cancelAccountQR(true); }
     else if (pageMode() === 'account' && accountData && accountData.phase === 'mfa') { cancelAccountVerification(true); }
     else if (shell.classList.contains('is-cinema')) {
@@ -3245,7 +3503,7 @@
   }
   function canShowAppUpdate() {
     var current = document.activeElement;
-    return !applicationInBackground && !applicationHidden() && !isPlaybackPage() && !supportModalOpen && !detailModalOpen && !(typeof actorWorksOpen !== 'undefined' && actorWorksOpen) && !discussionOpen && !confirmOpen && !playerOptionsOpen && !accountBusy && !accountKeypadOpen() && !(current && /INPUT|TEXTAREA/.test(current.tagName));
+    return !applicationInBackground && !applicationHidden() && pageMode() !== 'apps' && !isPlaybackPage() && !supportModalOpen && !detailModalOpen && !(typeof actorWorksOpen !== 'undefined' && actorWorksOpen) && !discussionOpen && !confirmOpen && !playerOptionsOpen && !accountBusy && !accountKeypadOpen() && !(current && /INPUT|TEXTAREA/.test(current.tagName));
   }
   // Old native IME callbacks are irrelevant to the app-owned numeric keypad.
   function openHomeProgram(program) {
@@ -3270,6 +3528,52 @@
     startPlayer({ series_id: program.series_id, title: program.title, intro: '', cover: '' }, null, { cardLaunch: !!program.cardLaunch });
   }
   window.HongguoTV = { prepareExit: function () { pauseForBackground(); return libraryQueue.catch(function () {}); }, remoteKey: remoteKey, requestBack: handleBack, mediaCommand: handleMediaCommand, togglePlaybackCommandMenu: togglePlaybackCommandMenu, pauseForBackground: pauseForBackground, resumeFromBackground: resumeFromBackground, desktopFullscreenChanged: desktopFullscreenChanged, canShowAppUpdate: canShowAppUpdate, finishAccountEditing: function () {}, finishSearchEditing: function () { var current = typeof androidShell !== 'undefined' && androidShell ? remoteFocusTarget() || document.activeElement : document.activeElement; if (current === searchInput) goFocus(searchSuggestionOpen ? firstVisible('.search-suggestion') || firstSearchAction() || firstSearchFilter() : firstSearchAction() || firstSearchFilter()); }, openHomeProgram: openHomeProgram };
+
+  function miniPlayerState() {
+    var video = document.getElementById('hero-video');
+    var item = activePlayback && activePlayback.item || feedItems[feedIndex] || featuredItem || {};
+    var episode = Number(activePlayback && activePlayback.episode || playbackRequest && playbackRequest.episode || item.start_episode) || 0;
+    var total = Number(item.episode_count) || 0;
+    var available = isPlaybackPage() && !!item.series_id &&
+      !coreConnectionModalOpen && !detailModalOpen && !playerOptionsOpen && !confirmOpen && !discussionOpen &&
+      !(typeof playbackCommandMenuOpen !== 'undefined' && playbackCommandMenuOpen) &&
+      !(typeof actorWorksOpen !== 'undefined' && actorWorksOpen) && !(endRecommendations && endRecommendations.isOpen());
+    var recommend = available && pageMode() === 'recommend';
+    var width = video.videoWidth || activePlayback && activePlayback.videoWidth || 0;
+    var height = video.videoHeight || activePlayback && activePlayback.videoHeight || 0;
+    return { available: available, title: item.title || '', episode: episode, portrait: height > width,
+      previousEpisode: available && episode > 1, nextEpisode: available && episode > 0 && (!total || episode < total),
+      previousDrama: recommend && feedIndex > 0, nextDrama: recommend && (feedIndex + 1 < feedItems.length || feedPager.hasMore() || !!feedPager.error),
+      canPlay: available && !!video.getAttribute('src'), paused: video.paused || video.ended,
+      position: Number(video.currentTime) || 0, duration: Number.isFinite(video.duration) ? video.duration : 0,
+      volume: (playbackAudioHold ? playbackAudioHold.muted : video.muted) ? 0 : Math.round(video.volume * 100) };
+  }
+  function miniPlayerCommand(action, value) {
+    var state = miniPlayerState();
+    if (!desktopShell || !state.available || applicationInBackground || applicationHidden()) return false;
+    if (action === 'previousEpisode' && state.previousEpisode) return switchPlayerEpisode(-1, true);
+    if (action === 'nextEpisode' && state.nextEpisode) return switchPlayerEpisode(1, true);
+    if (action === 'previousDrama' && state.previousDrama) switchRecommendation(-1);
+    else if (action === 'nextDrama' && state.nextDrama) switchRecommendation(1);
+    else if (action === 'toggle') toggleVideo();
+    else if (action === 'seek') return seekTo(value, false);
+    else if (action === 'volume' && Number.isFinite(value) && value >= 0 && value <= 100) {
+      document.getElementById('hero-video').volume = value / 100;
+      setPlaybackMuted(value === 0); playbackPreferences.volume = value;
+      savePlaybackPreferences(); updatePlaybackControls();
+    } else return false;
+    return true;
+  }
+  if (desktopShell) {
+    window.HongguoTV.miniPlayerState = miniPlayerState;
+    window.HongguoTV.miniPlayerCommand = miniPlayerCommand;
+    window.HongguoTV.miniPlayerFocus = goFocus;
+    window.HongguoTV.miniPlayerNotify = showNotice;
+    window.HongguoTV.miniPlayerChanged = function (enabled, cinema) {
+      if (enabled) { cancelPendingAutoCinema(); closePlaybackMenuHint(); }
+      else if (isPlaybackPage()) { setCinema(!!cinema); revealControls(); }
+    };
+  }
 
   function isLibraryPage() { return ['history', 'favorites', 'likes'].indexOf(pageMode()) >= 0; }
   function libraryEntry(id) { return libraryData.entries.filter(function (entry) { return entry.drama.series_id === id; })[0] || null; }
@@ -3299,6 +3603,11 @@
     // Keep the full detail and its episode arrays untouched for the player.
     if (typeof result.intro === 'string') result.intro = Array.from(result.intro).slice(0, 1000).join('');
     if (Array.isArray(result.tags)) result.tags = result.tags.slice(0, 8);
+    // Radar ratings are numeric and can survive a detail merge when the
+    // detail has no score. The library schema stores this optional field as
+    // text; malformed ratings must not prevent saving playback progress.
+    if (typeof result.score === 'number' && isFinite(result.score)) result.score = String(result.score);
+    else if (typeof result.score !== 'string') delete result.score;
     return result;
   }
   function followState(item) {
@@ -3369,6 +3678,7 @@
         if (!payload.ok || !payload.data) throw new Error(apiError(payload, 200, 'ui.recordInvalid', '记录响应无效'));
         libraryData = payload.data;
         libraryLoaded = true;
+        restoreWatchingReturn();
         updateSavedButtons();
         updateDetailProgress();
         if (isLibraryPage()) renderLibrary(true);
@@ -3388,6 +3698,7 @@
           if (ownerEpoch !== accountEpoch || (payload.data.owner_id || '') !== (libraryData.owner_id || '')) return false;
           libraryData = payload.data;
           libraryLoaded = true;
+          restoreWatchingReturn(change);
           updateSavedButtons();
           var changedSeriesID = change.drama && change.drama.series_id || change.series_id;
           if (detailModalOpen && currentDetail && currentDetail.series_id === changedSeriesID) updateDetailActions();
@@ -3476,6 +3787,8 @@
     if (value.indexOf('ai') >= 0) return 'ai';
     if (value.indexOf('comic') >= 0 || value.indexOf('漫') >= 0) return 'comic';
     if (value.indexOf('real') >= 0 || value.indexOf('真人') >= 0) return 'real';
+    if (value === '1' || value === 'short_play') return 'real';
+    if (value === '1004') return 'comic';
     return '';
   }
   function selectLibraryType(value) {
@@ -3492,6 +3805,7 @@
   function renderLibrary(restoring) {
     var kind = pageMode();
     if (!isLibraryPage()) return;
+    document.getElementById('library-statistics').classList.toggle('is-hidden', kind !== 'history' || libraryEditing);
     var label = ({ history: uiText('ui.history', '历史'), favorites: uiText('ui.favorite', '收藏'), likes: uiText('ui.likes', '点赞') })[kind];
     document.getElementById('library-title').textContent = kind === 'history' ? uiText('ui.watchHistory', '观看历史') : label;
     var libraryTabs = document.getElementById('library-tabs');
@@ -3634,6 +3948,7 @@
 
   function acceptAccountStatus(data) {
     var previous = accountData;
+    if (typeof watchStatisticsCollector !== 'undefined' && watchStatisticsCollector && String(data.profile && data.profile.uid || '') !== watchStatisticsOwner()) watchStatisticsCollector.stop(false);
     var wasInitialized = accountStatusInitialized;
     var owner = data.profile && data.profile.uid || '';
     var previousOwner = previous && previous.profile && previous.profile.uid || '';
@@ -3645,6 +3960,7 @@
     accountCountdownUntil = Date.now() + (data.retry_after || 0) * 1000;
     if (owner !== previousOwner || owner !== (libraryData.owner_id || '')) {
       ++accountEpoch;
+      if (typeof watchingReturn !== 'undefined' && watchingReturn) watchingReturn.clear();
       ++notificationGeneration;
       followNotificationItems = [];
       followNotificationUnread = 0;
@@ -3683,6 +3999,7 @@
       else if (pageMode() === 'recommend') loadCatalog(activeChannel().textContent);
       historyFilter = 'all';
       libraryData = { entries: [], owner_id: owner };
+      if (typeof watchStatisticsView !== 'undefined' && watchStatisticsView && watchStatisticsView.isOpen()) watchStatisticsView.reload();
       libraryLoaded = false;
       libraryReady = libraryQueue.catch(function () {}).then(loadLibrary);
       updateSavedButtons();
@@ -3994,11 +4311,19 @@
     else loader.onerror();
   }
 
+  function updateHeroRankBadge(item, value) {
+    var badge = document.getElementById('hero-rank-badge'), label = document.getElementById('hero-rank-label');
+    if (!badge || !label) return;
+    var text = String(value || item && item.rank_badge || '').trim();
+    label.textContent = text.slice(0, 80);
+    badge.classList.toggle('is-hidden', !text);
+  }
+
   function setFeatured(item, waitingForProgress, transitionKind) {
     if (!item || !item.series_id) return;
     featuredItem = item;
     var backdrop = document.getElementById('hero-backdrop');
-    var title = document.querySelector('.hero-title');
+    var title = document.getElementById('hero-series-title');
     var episode = document.querySelector('.hero-episode');
     var summary = document.querySelector('.hero-summary');
     var topTitle = document.getElementById('hero-top-title');
@@ -4017,6 +4342,7 @@
       } else setBackdrop(backdrop, item, poster);
     }
     if (title) title.textContent = item.title || uiText('app.name', '红果短剧');
+    updateHeroRankBadge(item);
     if (episode) episode.textContent = waitingForProgress ? item.episode_count ? uiText('content.episodeCount', '全{count}集', { count: item.episode_count }) : '' : uiText('content.episodeNumber', '第{episode}集', { episode: item.start_episode || 1 }) + (item.episode_count ? ' · ' + uiText('content.episodeCount', '全{count}集', { count: item.episode_count }) : '');
     if (summary) summary.textContent = item.intro || '';
     if (topTitle) topTitle.textContent = item.title || uiText('app.name', '红果短剧');
@@ -4155,6 +4481,38 @@
     return true;
   }
 
+  function renderWatchingReturn() {
+    if (typeof watchingReturn !== 'undefined' && watchingReturn) watchingReturn.render();
+  }
+
+  function rememberWatchingReturn() {
+    if (typeof watchingReturn === 'undefined' || !watchingReturn || !isPlaybackPage()) return;
+    var playback = activePlayback;
+    var request = playbackRequest;
+    var item, episode, position, completed = false;
+    if (playback && playback.owner === accountEpoch && playback.generation === feedGeneration) {
+      item = playback.item; episode = playback.episode; completed = !!playback.completed;
+      position = playback.started ? Math.max(0, Number(document.getElementById('hero-video').currentTime) || 0) : playback.position || 0;
+    } else if (request && request.owner === accountEpoch && request.generation === feedGeneration && feedItems[request.index] && feedItems[request.index].series_id === request.series_id) {
+      item = feedItems[request.index];
+      var entry = libraryEntry(item.series_id);
+      episode = request.episode || resumeEpisode(entry, item);
+      position = request.position !== undefined ? request.position : entry && !entry.completed && entry.episode === episode ? entry.position || 0 : 0;
+    }
+    if (!item || !episode) return;
+    if (completed) { episode = resumeEpisode({ last_played_at: 1, episode: episode, completed: true }, item); position = 0; }
+    watchingReturn.capture({ item: basicDrama(item), episode: episode, position: position, owner: accountEpoch });
+  }
+
+  function restoreWatchingReturn(change) {
+    if (typeof watchingReturn === 'undefined' || !watchingReturn) return;
+    var current = watchingReturn.snapshot();
+    if (change && change.kind === 'history' && (change.action === 'clear' ||
+        change.action === 'remove' && current && current.item.series_id === change.series_id)) watchingReturn.clear();
+    watchingReturn.restore(libraryData.entries);
+    renderWatchingReturn();
+  }
+
   function showRecommendationPlaceholder(title, summary) {
     var hero = document.getElementById('hero');
     clearTimeout(controlsTimer);
@@ -4234,7 +4592,8 @@
 
   function getDetail(item, signal) {
     if (detailCache[item.series_id]) return Promise.resolve(detailCache[item.series_id]);
-    return fetch('/api/v1/series/detail?series_id=' + encodeURIComponent(item.series_id), signal ? { signal: signal } : undefined)
+    var contentType = String(item.content_type || '') === '1003' ? '&content_type=1003' : '';
+    return fetch('/api/v1/series/detail?series_id=' + encodeURIComponent(item.series_id) + contentType, signal ? { signal: signal } : undefined)
       .then(function (response) { if (!response.ok) throw new Error(uiText('ui.detailHttp', '详情 HTTP {status}', { status: response.status })); return response.json(); })
       .then(function (payload) {
         if (!payload.ok || !payload.data) throw new Error(apiError(payload, 200, 'ui.detailInvalid', '详情响应无效'));
@@ -4264,6 +4623,39 @@
     if (restore && isPlaybackPage()) goFocus(document.getElementById('hero-feed-focus'));
   }
   function flushEndRecommendations() { if (typeof endRecommendations !== 'undefined' && endRecommendations) endRecommendations.flush(); }
+  function showNextSeasonHint(model) {
+    var card = document.getElementById('next-season-hint');
+    var cover = document.getElementById('next-season-cover');
+    setCover(cover, model.next);
+    cover.alt = '';
+    document.getElementById('next-season-title').textContent = model.next.title || uiText('ui.seasonNumber', '第{season}季', { season: model.season });
+    document.getElementById('next-season-position').textContent = model.total ?
+      uiText('player.seasonPosition', '第 {season} / {total} 季', { season: model.season, total: model.total }) :
+      uiText('ui.seasonNumber', '第{season}季', { season: model.season });
+    card.classList.remove('is-hidden'); card.setAttribute('aria-hidden', 'false');
+  }
+  function hideNextSeasonHint() {
+    var card = document.getElementById('next-season-hint');
+    card.classList.add('is-hidden'); card.setAttribute('aria-hidden', 'true');
+  }
+  function resetNextSeasonHint() {
+    if (typeof nextSeasonHint !== 'undefined' && nextSeasonHint) nextSeasonHint.reset();
+  }
+  function updateNextSeasonHint(video) {
+    if (typeof nextSeasonHint === 'undefined' || !nextSeasonHint) return;
+    var playback = activePlayback;
+    var entry = playback && seasonCatalogCache[playback.item.series_id];
+    // The existing season shortcut fetches this catalog on drama selection.
+    // Never fetch extra metadata or resolve media merely to show a hint.
+    var items = entry && entry.epoch === accountEpoch && entry.items;
+    var allowed = !!(playback && playback.owner === accountEpoch && playback.generation === feedGeneration &&
+      isPlaybackPage() && shell.classList.contains('is-cinema') && !applicationInBackground && !applicationHidden() &&
+      !playback.continuationPending && !seasonSwitchRequest && !detailModalOpen && !playerOptionsOpen &&
+      !playbackCommandMenuOpen && !discussionOpen && !confirmOpen && !scanModalOpen() && !supportModalOpen &&
+      !(endRecommendations && endRecommendations.isOpen()) &&
+      playbackVideoReady(playback, playback.presentation, video));
+    nextSeasonHint.update(playback, video, items, allowed);
+  }
   function offerEndRecommendations(playback, detail) {
     if (pageMode() !== 'player' || !endRecommendations || !HongguoEndRecommendations.itemsFor(detail.related, playback.item.series_id).length) return false;
     endRecommendations.offer(playback, detail.related);
@@ -4637,6 +5029,7 @@
   }
 
   function cancelPlaybackPreparation() {
+    resetNextSeasonHint();
     if (portraitBackdrop) portraitBackdrop.reset();
     clearPrefetchedEpisodeHint();
     clearRangeTransitionHint();
@@ -5101,6 +5494,21 @@
       });
     });
   }
+  function prefetchedEpisodeResetCover(generation) {
+    var hint = prefetchedEpisodeHint;
+    var current = activePlayback || playbackRequest;
+    if (webosShell || !hint || !current || hint.generation !== generation || hint.owner !== accountEpoch ||
+        hint.series_id !== (current.item ? current.item.series_id : current.series_id) || hint.episode !== current.episode ||
+        applicationInBackground || applicationHidden()) return null;
+    var hero = document.getElementById('hero');
+    var cover = document.getElementById('hero-episode-cover');
+    var target = cover && cover.__episodeTarget;
+    if (!target || target.generation !== generation || target.owner !== accountEpoch ||
+        !episodeCoverTargetCurrent(target, generation) || !cover.__coverSource || !cover.classList.contains('is-ready') ||
+        !hero.classList.contains('is-preparing-video') || !hero.classList.contains('is-episode-cover') ||
+        hero.classList.contains('is-native-frame-revealing')) return null;
+    return target;
+  }
   function finishPlaybackPreparation(playback) {
     var hero = document.getElementById('hero');
     var video = document.getElementById('hero-video');
@@ -5151,7 +5559,7 @@
           hero.classList.contains('is-episode-cover')) {
         presentation.revealing = true;
         hero.classList.add('is-native-frame-revealing');
-        presentation.revealTimer = setTimeout(complete, 180);
+        presentation.revealTimer = setTimeout(complete, 100);
         return;
       }
       if (isNativeMedia3PlaybackActive() && playback.preserveNativeTransition && hasHeldFrame) {
@@ -5406,8 +5814,15 @@
     // Keep the cover painted during native source reset. CSS visibility alone
     // did not prevent a grey hardware-video flash on the user's Android 6 TV.
     if (!keepRangeFrame) video.classList.remove('has-source');
+    // A decoded target preview can cover both pause and source replacement in
+    // the same paint. Other transitions still paint the reset cover separately.
+    var sourceResetCover = keepRangeFrame ? prefetchedEpisodeResetCover(generation) : null;
+    var paintedSourceResetCover = null;
+    var prefetchedSourceReset = false;
+    if (sourceResetCover) hero.classList.add('is-range-source-reset');
     var coveredReset = waitForPlaybackPaint(generation, request.signal).then(function (painted) {
       if (!painted) return false;
+      if (sourceResetCover && prefetchedEpisodeResetCover(generation) === sourceResetCover) paintedSourceResetCover = sourceResetCover;
       video.pause();
       if (keepRangeFrame) {
         updatePlaybackControls();
@@ -5429,7 +5844,7 @@
       playbackRequest.episode = episode; playbackRequest.position = position;
       setFeatured(Object.assign({}, item, { start_episode: episode }), false, 'refresh');
       setPlayerStatus(episodeLoadingText(episode));
-      var source = episode === 1 && firstVid(item) ? Promise.resolve(item) : getDetail(item, request.signal);
+      var source = episode === 1 && firstVid(item) && String(item.content_type) !== '1003' ? Promise.resolve(item) : getDetail(item, request.signal);
       return source.then(function (detail) {
         if (generation !== feedGeneration || request.signal.aborted) return null;
         var vid = episode === 1 ? firstVid(detail) : detail.vid_list && detail.vid_list[episode - 1];
@@ -5481,6 +5896,8 @@
             setPlayerStatus(episodeLoadingText(episode));
           }
           if (prepared && prepared.path) {
+            prefetchedSourceReset = !!(handoff && handoff.prefetchMode === 'full' && prepared.mode !== 'range' &&
+              activePlayback.timing.prepared_before_switch);
             playbackPrefetchHandoff = null;
             activePlayback.timing.handoff_wait_ms = Math.max(0, Date.now() - activePlayback.timing.handoff_started_at);
             return prepared;
@@ -5535,6 +5952,9 @@
         // Cover the source replacement before it reaches Android's video
         // compositor, and keep the cover until a frame from this source is ready.
         hero.classList.add('is-range-source-reset');
+        if (prefetchedSourceReset && paintedSourceResetCover && prefetchedEpisodeResetCover(generation) === paintedSourceResetCover) {
+          attachPreparedSource(); return;
+        }
         return waitForPlaybackPaint(generation, request.signal).then(function (painted) {
           if (!painted || generation !== feedGeneration || request.signal.aborted) return;
           attachPreparedSource();
@@ -5585,7 +6005,7 @@
 
   function isAutoCinemaCardLaunch(target) {
     if (!target || typeof target.closest !== 'function') return false;
-    return !!target.closest('.catalog-card, .search-result-card, .library-card, .rank-row, .radar-official-row, .radar-growth-row, .new-card, .calendar-row, .reservation-row, .follow-card, .actor-work-card');
+    return !!target.closest('.catalog-card, .search-result-card, .search-hot-item, .search-guess, .library-card, .rank-row, .radar-official-row, .radar-growth-row, .new-card, .calendar-row, .reservation-row, .follow-card, .actor-work-card');
   }
 
   function shouldAutoCinemaForLaunch(currentPage, returnFocus, startOptions) {
@@ -5607,12 +6027,14 @@
       playerReturnFocus = returnFocus || document.activeElement;
     }
     shell.dataset.mode = 'player';
+    renderWatchingReturn();
     shell.classList.add('is-player');
     if (typeof syncNativePlaybackPageState === 'function') syncNativePlaybackPageState();
     document.getElementById('page-context').disabled = false;
     mainSurface.classList.remove('has-search', 'has-placeholder', 'has-workspace');
     hideWorkspacePages();
     searchPage.classList.add('is-hidden');
+    if (searchDiscovery) searchDiscovery.hide(true);
     pagePlaceholder.classList.add('is-hidden');
     document.getElementById('page-context').textContent = uiText('ui.back', '← 返回');
     document.getElementById('hero').classList.add('is-feed');
@@ -5621,10 +6043,12 @@
     cancelPendingAutoCinema();
     playbackMenuHintCandidate = menuHintCandidate;
     autoCinemaCandidate = autoCinemaEnabled && launchFromCard;
-    playFeedItem(0, item.__explicitEpisode ? item.start_episode : undefined, item.__explicitEpisode ? 0 : undefined);
+    var watchingResume = startOptions && startOptions.watchingResume;
+    playFeedItem(0, watchingResume ? watchingResume.episode : item.__explicitEpisode ? item.start_episode : undefined, watchingResume ? watchingResume.position : item.__explicitEpisode ? 0 : undefined);
     if (autoCinemaCandidate) autoCinemaGeneration = feedGeneration;
     if (recommendation) settleRecommendationSave(recommendation, libraryQueue);
     goFocus(document.getElementById('hero-feed-focus'));
+    if (watchingResume) { cancelPendingAutoCinema(); setCinema(true); revealControls(); }
   }
 
   function leavePlayer() {
@@ -6127,6 +6551,7 @@
     var params = Object.assign({ path: path }, searchFilters);
     if (searchPanelPending) params.selectors = '1';
     searchKind = 'browse';
+    if (searchDiscovery && pageMode() === 'search') searchDiscovery.show();
     document.getElementById('filter-panel').classList.remove('is-hidden');
     document.getElementById('search-browse').classList.add('is-hidden');
     document.getElementById('search-result-title').textContent = filterSummary();
@@ -7046,6 +7471,9 @@
       tab.classList.toggle('is-active', selected);
       tab.setAttribute('aria-selected', String(selected));
     });
+    document.querySelectorAll('.follow-description').forEach(function (description) {
+      description.classList.toggle('is-hidden', description.dataset.followView !== followView);
+    });
     followPage.classList.toggle('has-notifications', showNotifications);
     followListView.classList.toggle('is-hidden', reservations || showNotifications);
     followNotificationView.classList.toggle('is-hidden', !showNotifications);
@@ -7078,6 +7506,7 @@
     if (androidShell && window.HongguoTVInput && typeof window.HongguoTVInput.finishSearchEditing === 'function') window.HongguoTVInput.finishSearchEditing();
     searchInput.value = query;
     activeSearchQuery = query; searchKind = 'keyword';
+    if (searchDiscovery) searchDiscovery.hide();
     document.getElementById('filter-panel').classList.add('is-hidden'); document.getElementById('search-browse').classList.remove('is-hidden');
     document.getElementById('search-result-title').textContent = uiText('ui.loadedSearchPrefix', '搜索：{query}', { query: query });
     var result = searchPager.reset({ q: query });
@@ -7095,6 +7524,61 @@
       if (!searchPager.loaded) return;
       if (document.activeElement === returnTarget) goFocus(firstSearchResult() || firstSearchAction());
     });
+  }
+
+  function renderSearchDiscovery(data, force) {
+    // Keep cached nodes alive across player/page returns so the existing
+    // return-focus reference remains usable.
+    if (!force && data === searchDiscoveryData) return;
+    searchDiscoveryData = data;
+    var root = document.getElementById('search-discovery');
+    var focused = document.activeElement;
+    var focusKey = focused && root.contains(focused) ? focused.dataset.focus : '';
+    var guesses = document.getElementById('search-guess-items');
+    var tabs = document.getElementById('search-hot-tabs');
+    var rows = document.getElementById('search-hot-items');
+    guesses.textContent = ''; tabs.textContent = ''; rows.textContent = '';
+    function bind(button, item) {
+      button.addEventListener('click', function () {
+        if (item.series_id) startPlayer(item, button);
+        else { searchInput.value = item.query || item.title; goFocus(searchInput); submitSearch(); }
+      });
+      button.addEventListener('focus', function () {
+        try { button.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (ignored) { button.scrollIntoView(false); }
+      });
+    }
+    data.guesses.forEach(function (item, index) {
+      var button = document.createElement('button');
+      button.className = 'search-guess'; button.dataset.focus = 'search-guess-' + index;
+      button.textContent = item.title; bind(button, item); guesses.appendChild(button);
+    });
+    var selected = null;
+    data.boards.forEach(function (board) { if (board.id === searchHotBoard) selected = board; });
+    if (!selected) selected = data.boards[0];
+    searchHotBoard = selected ? selected.id : '';
+    data.boards.forEach(function (board) {
+      var button = document.createElement('button');
+      button.className = 'search-hot-tab' + (board.id === searchHotBoard ? ' is-active' : '');
+      button.dataset.focus = 'search-hot-tab-' + board.id;
+      button.setAttribute('aria-pressed', String(board.id === searchHotBoard));
+      button.textContent = board.id === 'comic' ? uiText('search.hotComic', '漫剧热搜') : uiText('search.hotShort', '短剧热搜');
+      button.addEventListener('click', function () { searchHotBoard = board.id; renderSearchDiscovery(searchDiscoveryData, true); });
+      tabs.appendChild(button);
+    });
+    (selected ? selected.items : []).forEach(function (item, index) {
+      var button = document.createElement('button'); button.className = 'search-hot-item';
+      button.dataset.focus = 'search-hot-' + searchHotBoard + '-' + item.series_id;
+      var copy = document.createElement('span'); copy.className = 'search-hot-copy';
+      var position = document.createElement('span'); position.className = 'search-hot-position'; position.textContent = item.position || index + 1;
+      var title = document.createElement('span'); title.className = 'search-hot-title'; title.textContent = item.title;
+      var score = document.createElement('span'); score.className = 'search-hot-score'; score.textContent = item.search_score || '';
+      copy.appendChild(position); copy.appendChild(title); copy.appendChild(score); button.appendChild(copy);
+      bind(button, item); rows.appendChild(button);
+    });
+    document.getElementById('search-guesses').classList.toggle('is-hidden', !data.guesses.length);
+    document.getElementById('search-hot').classList.toggle('is-hidden', !selected);
+    root.classList.toggle('is-hidden', !data.guesses.length && !selected);
+    if (focusKey) goFocus(root.querySelector('[data-focus="' + focusKey + '"]') || belowSearchDiscovery());
   }
 
   function renderSearchHistory(items) {
@@ -7286,6 +7770,7 @@
       entry.pending = false; entry.expires = Date.now() + 120000;
       entry.items.forEach(function (item) { rememberSeasonCatalog(item.series_id, entry); });
       rememberSeasonCatalog(id, entry);
+      updateNextSeasonHint(document.getElementById('hero-video'));
       if (playbackMenuHintCandidate || (document.getElementById('playback-menu-hint') && !document.getElementById('playback-menu-hint').classList.contains('is-hidden'))) updatePlaybackMenuHintCopy(activePlayback);
       return entry.items;
     }).catch(function (error) {
@@ -7698,6 +8183,9 @@
 
   function activatePage(item, restoring) {
     cancelSearchSuggestionActivation();
+    if (item.dataset.page === 'apps' && (typeof recommendedApps === 'undefined' || !recommendedApps || !recommendedApps.supported)) return;
+    if (typeof watchStatisticsCollector !== 'undefined' && watchStatisticsCollector) watchStatisticsCollector.stop(true);
+    if (typeof watchStatisticsView !== 'undefined' && watchStatisticsView && watchStatisticsView.isOpen()) closeWatchStatistics(false);
     if (portraitBackdrop) portraitBackdrop.reset();
     if (accountQR && accountQR.snapshot().active && item.dataset.page !== 'account') cancelAccountQR(false);
     if (item.dataset.page === 'recommend' && pageMode() === 'recommend') {
@@ -7715,6 +8203,7 @@
     if (detailModalOpen) closeDetail();
     closePlayerOptions(false);
     var recommendation = rememberRecommendation();
+    rememberWatchingReturn();
     settleRecommendationSave(recommendation, saveProgress(true));
     allPagers.forEach(function (pager) { pager.cancel(); });
     activePlayback = null;
@@ -7724,12 +8213,14 @@
     document.querySelectorAll('.side-item').forEach(function (node) { node.classList.toggle('is-active', node === item); });
     var label = item.querySelector('[data-i18n]');
     shell.dataset.mode = item.dataset.page || 'recommend';
+    renderWatchingReturn();
     if (typeof syncNativePlaybackPageState === 'function') syncNativePlaybackPageState();
     document.getElementById('page-context').textContent = label ? label.textContent : uiText('ui.page', '页面');
     document.getElementById('page-context').disabled = true;
     shell.classList.remove('is-player');
     mainSurface.classList.remove('has-search', 'has-workspace', 'has-placeholder');
     searchPage.classList.add('is-hidden');
+    if (searchDiscovery) searchDiscovery.hide(true);
     pagePlaceholder.classList.add('is-hidden');
     hideWorkspacePages();
     if (item.dataset.page === 'recommend') {
@@ -7745,6 +8236,7 @@
       mainSurface.classList.add('has-search');
       searchPage.classList.remove('is-hidden');
       searchHistory.load();
+      if (searchKind === 'browse' && searchDiscovery) searchDiscovery.show();
       if (!searchPager.loaded) { if (searchKind === 'keyword' && activeSearchQuery) submitSearch(); else loadBrowse(false, !filterRows.length); } else queueTailCheck();
     } else if (item.dataset.page === 'rank') {
       mainSurface.classList.add('has-workspace');
@@ -7778,6 +8270,10 @@
     } else if (item.dataset.page === 'support') {
       mainSurface.classList.add('has-workspace');
       supportPage.classList.remove('is-hidden');
+    } else if (item.dataset.page === 'apps') {
+      mainSurface.classList.add('has-workspace');
+      recommendedAppsPage.classList.remove('is-hidden');
+      recommendedApps.show();
     } else {
       mainSurface.classList.add('has-placeholder');
       pagePlaceholder.classList.remove('is-hidden');
@@ -7805,6 +8301,9 @@
   window.addEventListener('resize', queueTailCheck);
   window.addEventListener('resize', layoutLastPlaybackFrame);
   window.addEventListener('resize', resizePlaybackMenuHint);
+  window.addEventListener('resize', function () { if (watchingReturn) watchingReturn.layout(); });
+  document.querySelector('.sidebar').addEventListener('scroll', function () { if (watchingReturn) watchingReturn.layout(); });
+  if (window.HongguoI18n && typeof window.HongguoI18n.onChange === 'function') window.HongguoI18n.onChange(renderWatchingReturn);
   window.addEventListener('resize', function () { if (endRecommendations && endRecommendations.isOpen()) scrollEndRecommendationIntoView(document.activeElement); });
   window.addEventListener('blur', cancelEndRecommendationAutoplay);
   document.addEventListener('focusin', function (event) {
@@ -8296,7 +8795,128 @@
     request.send();
   }
 
+  function watchStatisticsOwner() {
+    return String(accountData && accountData.logged_in && accountData.profile && accountData.profile.uid || '');
+  }
+  var watchStatisticsObserved = Object.create(null);
+  function rememberWatchStatisticsMetadata(id, metadata) {
+    if (!id || !metadata) return;
+    var ids = Object.keys(watchStatisticsObserved);
+    if (ids.length >= 24 && !watchStatisticsObserved[id]) delete watchStatisticsObserved[ids[0]];
+    watchStatisticsObserved[id] = metadata;
+  }
+  var watchStatisticsMetadata = Object.create(null);
+  function watchStatisticsMetadataFor(id) {
+    if (!id) return Promise.resolve(null);
+    if (watchStatisticsMetadata[id]) return watchStatisticsMetadata[id];
+    var ids = Object.keys(watchStatisticsMetadata);
+    if (ids.length >= 24) delete watchStatisticsMetadata[ids[0]];
+    var abort = new AbortController(), timeout = setTimeout(function () { abort.abort(); }, 2000);
+    // Recommended first episodes may play without fetching details. Resolve
+    // labels only in this background statistics queue, never the player path.
+    watchStatisticsMetadata[id] = getDetail({ series_id: id }, abort.signal).then(function (detail) {
+      clearTimeout(timeout); return detail;
+    }, function () { clearTimeout(timeout); delete watchStatisticsMetadata[id]; return null; });
+    return watchStatisticsMetadata[id];
+  }
+  function enrichWatchStatisticsBatch(batch) {
+    var items = batch.items.map(function (item) {
+      var metadata = watchStatisticsObserved[item.series_id];
+      var observedType = metadata && dramaType(metadata);
+      return Object.assign({}, item, { type: observedType === 'ai' || item.type === 'unknown' && observedType ? observedType : item.type,
+        genre: item.genre || window.HongguoWatchStatistics.genreFor(metadata && metadata.tags || []) });
+    });
+    var ids = [];
+    items.forEach(function (item) { if (item.series_id && (!item.genre || item.type === 'unknown') && ids.indexOf(item.series_id) < 0) ids.push(item.series_id); });
+    return Promise.all(ids.map(watchStatisticsMetadataFor)).then(function (details) {
+      return { owner_id: batch.owner_id, id: batch.id, revision: batch.revision, items: items.map(function (item) {
+        var index = ids.indexOf(item.series_id), detail = index >= 0 && details[index];
+        return { day: item.day, ms: item.ms, type: item.type === 'unknown' && detail ? dramaType(detail) || 'unknown' : item.type,
+          genre: item.genre || window.HongguoWatchStatistics.genreFor(detail && detail.tags || []) };
+      }) };
+    });
+  }
+  function watchStatisticsRequest(method, owner, batch) {
+    var abort = new AbortController();
+    var timeout = setTimeout(function () { abort.abort(); }, 3000);
+    var request = { method: method, signal: abort.signal };
+    if (batch) { request.headers = { 'Content-Type': 'application/json' }; request.body = JSON.stringify(batch); }
+    return fetch('/api/v1/watch-statistics?owner_id=' + encodeURIComponent(owner) + '&day=' + window.HongguoWatchStatistics.dayKey(Date.now()), request).then(function (response) {
+      if (!response.ok) { var error = new Error('statistics unavailable'); error.status = response.status; throw error; }
+      return response.json();
+    }).then(function (payload) {
+      clearTimeout(timeout);
+      if (!payload.ok) throw new Error('statistics unavailable');
+      return payload.data;
+    }, function (error) { clearTimeout(timeout); throw error; });
+  }
+  function openWatchStatistics() {
+    if (pageMode() !== 'history' || libraryEditing) return;
+    libraryPage.classList.add('has-watch-statistics');
+    document.getElementById('watch-statistics').classList.remove('is-hidden');
+    libraryPage.scrollTop = 0;
+    watchStatisticsView.show();
+    goFocus(document.querySelector('[data-stat-back]'));
+  }
+  function closeWatchStatistics(focus) {
+    watchStatisticsView.hide();
+    libraryPage.classList.remove('has-watch-statistics');
+    document.getElementById('watch-statistics').classList.add('is-hidden');
+    if (focus !== false && pageMode() === 'history') goFocus(document.getElementById('library-statistics'));
+  }
+  function confirmResetWatchStatistics() {
+    if (confirmOpen || !watchStatisticsView.isOpen()) return;
+    var owner = watchStatisticsOwner(), epoch = accountEpoch;
+    var generation = ++confirmationGeneration;
+    confirmReturnFocus = document.querySelector('[data-stat-reset]');
+    confirmOpen = true;
+    document.getElementById('confirm-title').textContent = uiText('stats.resetTitle', '重置观看统计？');
+    document.getElementById('confirm-copy').textContent = uiText('stats.resetCopy', '清空当前用户在本设备的观看时长、内容类型和题材偏好，从现在重新记录。观看历史和播放进度不受影响。');
+    document.getElementById('confirm-cancel').textContent = uiText('common.cancel', '取消');
+    var accept = document.getElementById('confirm-accept');
+    accept.textContent = uiText('stats.reset', '重置统计');
+    accept.classList.remove('confirm-reserve'); accept.classList.add('confirm-danger');
+    confirmOperation = function () {
+      if (owner !== watchStatisticsOwner() || epoch !== accountEpoch || !watchStatisticsView.isOpen()) return Promise.resolve(true);
+      return watchStatisticsView.reset(owner).then(function (ok) {
+        if (ok) showNotice(uiText('stats.resetDone', '统计已重置，从现在重新记录'));
+        return true;
+      }, function () {
+        if (confirmOpen && generation === confirmationGeneration) document.getElementById('confirm-copy').textContent = uiText('stats.resetFailed', '重置失败，请重试。');
+        return false;
+      });
+    };
+    document.getElementById('confirm-modal').classList.remove('is-hidden');
+    document.getElementById('confirm-modal').setAttribute('aria-hidden', 'false');
+    goFocus(document.getElementById('confirm-cancel'));
+  }
+  var watchStatisticsCollector = window.HongguoWatchStatistics.createCollector({
+    snapshot: function () {
+      var p = activePlayback, video = document.getElementById('hero-video');
+      if (!p || !video) return null;
+      var item = p.item || {}, metadata = watchStatisticsObserved[item.series_id] || {}, observedType = dramaType(metadata);
+      return { key: String(p.generation) + ':' + p.vid + ':' + p.episode, owner: watchStatisticsOwner(),
+        eligible: accountStatusInitialized && libraryLoaded && p.owner === accountEpoch && p.started && isPlaybackPage() && !applicationInBackground && !applicationHidden() &&
+          !video.paused && !video.ended && !video.seeking && !video.error && video.readyState >= 2 && !(p.presentation && p.presentation.waiting),
+        position: Number(video.currentTime) || 0, rate: Number(video.playbackRate) || 1, type: observedType === 'ai' ? 'ai' : dramaType(item) || observedType, tags: item.tags && item.tags.length ? item.tags : metadata.tags || [], series_id: item.series_id || '' };
+    },
+    revision: function (owner) { return watchStatisticsRequest('GET', owner).then(function (data) { return data.revision || ''; }); },
+    request: function (batch) { return enrichWatchStatisticsBatch(batch).then(function (payload) { return watchStatisticsRequest('POST', payload.owner_id, payload); }); }
+  });
+  var watchStatisticsView = window.HongguoWatchStatistics.createView({
+    root: document.getElementById('watch-statistics'), text: uiText, owner: watchStatisticsOwner,
+    flush: function () { return watchStatisticsCollector.flush(); },
+    request: function (owner) { return watchStatisticsRequest('GET', owner); }, close: closeWatchStatistics,
+    confirmReset: confirmResetWatchStatistics,
+    reset: function (owner) { return watchStatisticsCollector.reset(owner, function () {
+      return watchStatisticsRequest('DELETE', owner);
+    }); }
+  });
+  document.getElementById('library-statistics').addEventListener('click', openWatchStatistics);
+  if (window.HongguoI18n && typeof window.HongguoI18n.onChange === 'function') window.HongguoI18n.onChange(function () { watchStatisticsView.render(); });
+
   var media = document.getElementById('hero-video');
+  watchStatisticsCollector.bind(media, window);
   media.addEventListener('loadedmetadata', function () {
     if (!activePlayback || activePlayback.generation !== feedGeneration) return;
     if (media.videoWidth > 0 && media.videoHeight > 0) {
@@ -8306,7 +8926,7 @@
     if (typeof maybeSkipRecommendationOrientation === 'function' && maybeSkipRecommendationOrientation(activePlayback, media.videoWidth, media.videoHeight)) return;
     var position = activePlayback.position;
     var adapter = typeof window !== 'undefined' ? window.HongguoNativePlaybackAdapter : null;
-    var nativeStartPosition = adapter && typeof adapter.isNative === 'function' && adapter.isNative();
+    var nativeStartPosition = adapter && (typeof adapter.isNative === 'function' && adapter.isNative() || typeof adapter.startPositionApplied === 'function' && adapter.startPositionApplied());
     if (!nativeStartPosition && position > 0 && Number.isFinite(media.duration)) media.currentTime = Math.min(position, Math.max(0, media.duration - .25));
     media.playbackRate = playbackPreferences.speed;
     updatePlaybackControls();
@@ -8357,11 +8977,13 @@
     tickDanmaku();
     checkPlaybackProgress(media);
     if (!activePlayback || !activePlayback.started) return;
+    updateNextSeasonHint(media);
     if (!shell.classList.contains('is-controls-hidden')) updatePlaybackControls();
     maybePrefetchNextEpisode(media);
     saveProgress(false);
   });
   media.addEventListener('pause', function () {
+    resetNextSeasonHint();
     if (typeof cancelFullEpisodePrefetchForPlayback === 'function') cancelFullEpisodePrefetchForPlayback(activePlayback);
     if (activePlayback) activePlayback.stableSince = 0;
     var staticMpvFrame = activePlayback && playbackEngineName() === 'mpv' && !activePlayback.started &&
@@ -8409,6 +9031,7 @@
   });
   media.addEventListener('emptied', updatePlaybackControls);
   media.addEventListener('waiting', function () {
+    resetNextSeasonHint();
     if (!activePlayback) return;
     if (typeof cancelFullEpisodePrefetchForPlayback === 'function') cancelFullEpisodePrefetchForPlayback(activePlayback);
     activePlayback.stableSince = 0;
@@ -8421,7 +9044,7 @@
     if (typeof cancelFullEpisodePrefetchForPlayback === 'function') cancelFullEpisodePrefetchForPlayback(activePlayback);
     if (activePlayback && activePlayback.mode === 'range') scheduleRangeStallFallback(activePlayback);
   });
-  media.addEventListener('seeking', function () { if (activePlayback) { if (typeof cancelFullEpisodePrefetchForPlayback === 'function') cancelFullEpisodePrefetchForPlayback(activePlayback); activePlayback.stableSince = 0; } interruptPlaybackPresentation(activePlayback); });
+  media.addEventListener('seeking', function () { resetNextSeasonHint(); if (activePlayback) { if (typeof cancelFullEpisodePrefetchForPlayback === 'function') cancelFullEpisodePrefetchForPlayback(activePlayback); activePlayback.stableSince = 0; } interruptPlaybackPresentation(activePlayback); });
   media.addEventListener('seeked', function () {
     if (activePlayback && activePlayback.started && !media.paused && !media.ended) activePlayback.stableSince = Date.now();
     if (activePlayback && activePlayback.presentation) activePlayback.presentation.position = Number(media.currentTime) || 0;
@@ -8429,6 +9052,7 @@
     if (media.paused) setPlayerStatus('');
   });
   media.addEventListener('error', function () {
+    resetNextSeasonHint();
     if (!activePlayback || !media.getAttribute('src')) return;
     clearRangeStallTimer();
     if (fallbackRangePlayback(activePlayback)) return;
@@ -8436,6 +9060,7 @@
     setPlayerStatus(uiText('ui.playbackFailed', '这集未能正常播放'), true);
   });
   media.addEventListener('ended', function () {
+    resetNextSeasonHint();
     clearRangeStallTimer();
     var playback = activePlayback;
     if (!playback || playback.generation !== feedGeneration) return;
@@ -8452,7 +9077,7 @@
     }
     continueAfterEpisode(playback);
   });
-  document.addEventListener('visibilitychange', function () { if (desktopShell) return; if (applicationHidden()) pauseForBackground(); else resumeFromBackground(); });
+  document.addEventListener('visibilitychange', function () { if (applicationHidden()) watchStatisticsCollector.stop(true); if (desktopShell) return; if (applicationHidden()) pauseForBackground(); else resumeFromBackground(); });
 
   function openQRCode(card, image, title) {
     supportReturnFocus = card; supportModalOpen = true;
@@ -8522,6 +9147,13 @@
       if (method === 'POST') { options.headers = { 'Content-Type': 'application/json' }; options.body = JSON.stringify({ kind: kind, country_code: meta && meta.country_code || '' }); }
       return fetchData('/api/v1/number-input' + (session ? '?session=' + encodeURIComponent(session) : ''), options);
   }
+  searchDiscovery = window.HongguoSearchDiscovery.create({
+    request: function () { return fetchData('/api/v1/search/discovery'); },
+    render: renderSearchDiscovery
+  });
+  if (window.HongguoI18n && typeof window.HongguoI18n.onChange === 'function') window.HongguoI18n.onChange(function () {
+    renderSearchDiscovery(searchDiscoveryData, true);
+  });
   searchHistory = window.HongguoSearchHistory.create({
     request: function (method, query) {
       var options = { method: method };
@@ -8590,6 +9222,8 @@
     },
     render: function (target, data) {
       setEpisodeCover(target, data);
+      if (target && data && data.metadata) rememberWatchStatisticsMetadata(target.series_id, data.metadata);
+      if (target && featuredItem && target.series_id === featuredItem.series_id) updateHeroRankBadge(featuredItem, data && data.rank_badge);
       ['like', 'favorite', 'comment'].forEach(function (kind) {
         var field = { like: 'likes', favorite: 'favorites', comment: 'comments' }[kind];
         var text = window.HongguoEngagement.countText(data && data[field]);
@@ -8639,6 +9273,40 @@
     });
   });
   var desktopUpdateNotifiedCode = 0;
+  var recommendedApps = window.HongguoRecommendedAppsUI.create({
+    android: androidShell && !desktopShell && !webosShell,
+    bridge: window.HongguoRecommendedApps,
+    render: function (apps) {
+      apps.forEach(function (data) {
+        var card = recommendedAppsPage.querySelector('[data-recommended-app="' + data.id + '"]');
+        if (!card) return;
+        var view = window.HongguoRecommendedAppsUI.model(data, function (key, values) { return uiText(key, key, values); });
+        var action = card.querySelector('.recommended-app-action');
+        action.removeAttribute('data-i18n'); action.textContent = view.label;
+        action.setAttribute('aria-disabled', view.blocked ? 'true' : 'false');
+        var android = card.querySelector('[data-app-android]');
+        android.removeAttribute('data-i18n'); android.textContent = view.android;
+        card.querySelector('[data-app-version]').textContent = view.version;
+        card.querySelector('[data-app-size]').textContent = view.size;
+        card.querySelector('.recommended-app-status').textContent = view.status;
+        var progress = card.querySelector('.recommended-app-progress');
+        progress.classList.toggle('is-hidden', data.state !== 'downloading');
+        progress.setAttribute('aria-valuenow', String(view.percent));
+        progress.firstElementChild.style.width = view.percent + '%';
+      });
+    }
+  });
+  document.getElementById('sidebar-apps').classList.toggle('is-hidden', !recommendedApps.supported);
+  recommendedAppsPage.addEventListener('click', function (event) {
+    var button = event.target.closest('.recommended-app-action');
+    if (button && button.getAttribute('aria-disabled') !== 'true') recommendedApps.activate(button.getAttribute('data-app-id'));
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (applicationHidden()) recommendedApps.hide(); else if (pageMode() === 'apps') recommendedApps.show();
+  });
+  if (window.HongguoI18n) window.HongguoI18n.onChange(function () { recommendedApps.refresh(); });
+  window.addEventListener('pagehide', function () { recommendedApps.destroy(); });
+
   var appUpdates = window.HongguoAppUpdates.create({
     bridge: window.HongguoTVUpdates,
     canPrompt: canShowAppUpdate,
@@ -8704,6 +9372,25 @@
   document.querySelectorAll('.playback-mode-action').forEach(function (button) {
     button.addEventListener('click', function () { playbackSettings.choose(button.getAttribute('data-mode')); });
   });
+  if (window.HongguoWindowsDecoder) {
+    var windowsDecoder = window.HongguoWindowsDecoder;
+    document.getElementById('windows-playback-settings').classList.remove('is-hidden');
+    var renderWindowsDecoder = function () {
+      document.querySelectorAll('.windows-playback-action').forEach(function (button) {
+        var selected = button.getAttribute('data-mode') === windowsDecoder.mode();
+        button.classList.toggle('account-primary', selected);
+        button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      });
+    };
+    renderWindowsDecoder();
+    document.querySelectorAll('.windows-playback-action').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var saved = windowsDecoder.choose(button.getAttribute('data-mode'));
+        renderWindowsDecoder();
+        document.getElementById('windows-decode-state').textContent = saved ? uiText('settings.windowsDecoderApplied', '已保存，下次播放或切集时生效。') : uiText('settings.saveFailed', '设置未能保存，请重试。');
+      });
+    });
+  }
   function renderPlaybackCustomDevice(data, message) {
     var value = data && data.data ? data.data : data || {};
     var did = document.getElementById('playback-custom-device-did');
@@ -8752,6 +9439,29 @@
     cancelPendingAutoCinema();
     if (!autoCinemaPreferences.choose(autoCinemaPreferences.enabled() ? 'disabled' : 'enabled')) showNotice(uiText('settings.saveFailed', '设置未能保存，请重试。'));
   });
+  function initRecommendationAutoCinemaSettings() {
+    var card = document.getElementById('recommendation-auto-cinema-settings');
+    var toggle = document.getElementById('recommendation-auto-cinema-toggle');
+    if (!card || !toggle || !window.HongguoRecommendationAutoCinema) return;
+    recommendationAutoCinemaPreferences = window.HongguoRecommendationAutoCinema.create({
+      platform: autoCinemaPlatform,
+      diagnostics: window.HongguoTVDiagnostics,
+      bridge: window.HongguoTVPreferences,
+      render: function (data) {
+        card.classList.toggle('is-hidden', !data.supported);
+        toggle.setAttribute('aria-pressed', data.enabled ? 'true' : 'false');
+        toggle.setAttribute('data-i18n', data.enabled ? 'settings.autoCinemaEnabled' : 'settings.autoCinemaDisabled');
+        toggle.classList.toggle('account-primary', data.enabled);
+        toggle.textContent = uiText(data.enabled ? 'settings.autoCinemaEnabled' : 'settings.autoCinemaDisabled', data.enabled ? '已开启' : '已关闭');
+        var state = document.getElementById('recommendation-auto-cinema-state');
+        state.setAttribute('data-i18n', data.message ? 'settings.saveFailed' : 'settings.recommendationAutoCinemaState');
+        state.textContent = data.message ? uiText('settings.saveFailed', '设置未能保存，请重试。') : uiText('settings.recommendationAutoCinemaState', '仅适用于 Android TV，默认关闭。');
+      }
+    });
+    toggle.addEventListener('click', function () {
+      if (!recommendationAutoCinemaPreferences.choose(recommendationAutoCinemaPreferences.enabled() ? 'disabled' : 'enabled')) showNotice(uiText('settings.saveFailed', '设置未能保存，请重试。'));
+    });
+  }
   var webosAudio = webosShell && window.HongguoWebOSAudio;
   function updateWebOSAudioSettings() {
     var audio = webosShell && window.HongguoWebOSAudio;
@@ -8892,6 +9602,43 @@
     applyDanmakuRegion();
     render();
   }
+  function initDanmakuSizeSettings() {
+    var preview = document.getElementById('danmaku-size-preview');
+    if (!preview) return;
+    function render() {
+      var size = normalizeDanmakuSize(playbackPreferences.danmaku_size);
+      document.querySelectorAll('.danmaku-size-action').forEach(function (button) {
+        var selected = Number(button.getAttribute('data-size')) === size;
+        button.classList.toggle('account-primary', selected);
+        button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      });
+      var line = HongguoDanmakuContent.createLine(document, {
+        text: uiText('settings.danmakuSizeSample', '太精彩了 [笑哭]'), likes: 128
+      }, HongguoEngagement.countText);
+      line.style.fontSize = danmakuFontSize() + 'px';
+      preview.innerHTML = '';
+      preview.appendChild(line);
+      document.getElementById('danmaku-size-state').textContent = uiText('settings.danmakuSizeCurrent', '当前字号：{size}%', { size: size });
+    }
+    document.querySelectorAll('.danmaku-size-action').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var previous = playbackPreferences.danmaku_size;
+        var next = normalizeDanmakuSize(Number(button.getAttribute('data-size')));
+        if (next === previous) return;
+        playbackPreferences.danmaku_size = next;
+        if (!savePlaybackPreferences()) {
+          playbackPreferences.danmaku_size = previous;
+          document.getElementById('danmaku-size-state').textContent = uiText('settings.saveFailed', '设置未能保存，请重试。');
+          return;
+        }
+        resetDanmaku();
+        render();
+        tickDanmaku();
+      });
+    });
+    if (window.HongguoI18n && typeof window.HongguoI18n.onChange === 'function') window.HongguoI18n.onChange(render);
+    render();
+  }
   function initEpisodePrefetchSettings() {
     episodePrefetchSettings = HongguoEpisodePrefetchSettings.create({
       platform: episodePrefetchPlatform(),
@@ -8940,6 +9687,7 @@
   }
   updateWebOSAudioSettings();
   initRecommendationDirectionSettings();
+  initRecommendationAutoCinemaSettings();
   if (webosAudio && webosAudio.supported) {
     document.getElementById('webos-audio-toggle').addEventListener('click', function () {
       if (!webosAudio.choose(!webosAudio.isEnabled())) showNotice(uiText('settings.saveFailed', '设置未能保存，请重试。'));
@@ -8961,6 +9709,7 @@
   initEpisodePrefetchSettings();
   initPortraitBackground();
   initDanmakuRegionSettings();
+  initDanmakuSizeSettings();
   loadStatus();
   libraryReady = loadLibrary();
   pollAccount();

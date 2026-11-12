@@ -34,10 +34,12 @@ type desktopApp struct {
 	ctx           context.Context
 	exitConfirmed atomic.Bool
 	exitPending   atomic.Bool
+	mini          miniPlayerController
 }
 
 func (a *desktopApp) startup(ctx context.Context) {
 	a.ctx = ctx
+	desktopObserveWindow()
 	configureDesktopMedia()
 	a.core.start()
 	go a.updater.automatic()
@@ -54,7 +56,8 @@ func (a *desktopApp) GetWindowState() string {
 	state := struct {
 		Hidden     bool `json:"hidden"`
 		Fullscreen bool `json:"fullscreen"`
-	}{desktopWindowHidden(a.ctx), wruntime.WindowIsFullscreen(a.ctx)}
+		MiniPlayer bool `json:"mini_player"`
+	}{desktopWindowHidden(a.ctx), wruntime.WindowIsFullscreen(a.ctx), a.mini.state().Active}
 	b, _ := json.Marshal(state)
 	return string(b)
 }
@@ -94,6 +97,7 @@ func (a *desktopApp) OpenUpdateFolder() {
 
 func (a *desktopApp) FinishExit() {
 	if !a.exitConfirmed.Swap(true) {
+		a.mini.save(runtimeMiniWindow{a.ctx})
 		wruntime.Quit(a.ctx)
 	}
 }
@@ -146,10 +150,11 @@ func main() {
 }
 
 func desktopOptions(app *desktopApp, dataDir string) *options.App {
+	app.mini.load(filepath.Join(dataDir, "mini-player-window.json"))
 	// On Linux, queue configuration before the WebView's initial navigation.
 	configureDesktopMedia()
 	return &options.App{
-		Title: "红果短剧", Width: 1280, Height: 800, MinWidth: 960, MinHeight: 540,
+		Title: "红果短剧", Width: 1280, Height: 800, MinWidth: normalMinWidth, MinHeight: normalMinHeight,
 		BackgroundColour: options.NewRGB(12, 13, 18),
 		// No Assets filesystem: the core's embedded index is the actual page.
 		AssetServer: &assetserver.Options{Handler: http.HandlerFunc(app.core.proxy)},

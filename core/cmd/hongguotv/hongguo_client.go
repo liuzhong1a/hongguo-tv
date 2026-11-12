@@ -40,6 +40,7 @@ type Drama struct {
 	VidList              []string  `json:"vid_list,omitempty"`
 	Tags                 []string  `json:"tags,omitempty"`
 	Rank                 int       `json:"rank,omitempty"`
+	RankBadge            string    `json:"rank_badge,omitempty"`
 	Heat                 string    `json:"heat,omitempty"`
 	FavoriteText         string    `json:"favorite_text,omitempty"`
 	LikeText             string    `json:"like_text,omitempty"`
@@ -1161,6 +1162,38 @@ func findArrayByKey(value any, key string) ([]any, bool) {
 	return nil, false
 }
 
+// Recommended first episodes supply genres as a JSON-encoded category_schema,
+// unlike detail/search responses' tags. Only category names cross our API;
+// ranking badges, navigation schemas and tracking fields are not genres.
+func dramaTags(object map[string]any) []string {
+	if tags := asStringSlice(object["tags"]); len(tags) > 0 {
+		return tags
+	}
+	raw, ok := object["category_schema"].(string)
+	if !ok || len(raw) > 65536 {
+		return nil
+	}
+	var categories []struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal([]byte(raw), &categories) != nil {
+		return nil
+	}
+	var tags []string
+	seen := map[string]bool{}
+	for _, category := range categories {
+		name := strings.TrimSpace(category.Name)
+		if name != "" && !seen[name] && len([]rune(name)) <= 40 {
+			tags = append(tags, name)
+			seen[name] = true
+			if len(tags) >= 8 {
+				break
+			}
+		}
+	}
+	return tags
+}
+
 func normalizeDrama(value any) (Drama, bool) {
 	object, ok := asMap(value)
 	if !ok {
@@ -1170,6 +1203,10 @@ func normalizeDrama(value any) (Drama, bool) {
 		if nestedObject, nestedOK := asMap(nested); nestedOK {
 			object = nestedObject
 		}
+	}
+	if firstNonEmpty(object["content_type"], object["contentType"]) == creatorAlbumContentType {
+		album, _ := asMap(object["album_info"])
+		return normalizeCreatorAlbum(album, object)
 	}
 	id := firstNonEmpty(asString(object["series_id_str"]), asString(object["series_id"]), asString(object["seriesId"]), asString(object["book_id"]), asString(object["id"]))
 	title := firstNonEmpty(asString(object["series_title"]), asString(object["series_name"]), asString(object["title"]), "未命名短剧")
@@ -1195,9 +1232,10 @@ func normalizeDrama(value any) (Drama, bool) {
 		EpisodeCount:         firstPositive(asInt(object["episode_cnt"]), asInt(object["episode_total_cnt"])),
 		AccessibleEpisodeCnt: firstPositive(asInt(object["accessible_episode_cnt"]), 0),
 		Vid:                  firstNonEmpty(asString(object["vid"]), asString(object["video_id"])),
-		Tags:                 asStringSlice(object["tags"]),
+		Tags:                 dramaTags(object),
 		VidList:              asStringSlice(object["vid_list"]),
 		Rank:                 asInt(object["rank"]),
+		RankBadge:            rankBadge(object),
 		Heat:                 asString(object["heatText"]),
 		FavoriteText:         asString(object["favoriteText"]),
 		LikeText:             asString(object["likeText"]),
