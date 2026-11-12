@@ -168,6 +168,18 @@
   .new-heading-row .new-filters { margin-left: 0; gap: 6px; }
   .new-filter { min-width: 52px; min-height: 34px; padding: 0 10px; font-size: 13px; }
 
+  /* 排行榜页：TV 的「160px 左侧子导航 + 右主区」横排结构在手机上把主区挤到
+     ~170px，标题只剩三个字、标签竖排。改为上下堆叠，子导航变横滑 chip。 */
+  .rank-layout { flex-direction: column; gap: 10px; }
+  .rank-subnav { flex: 0 0 auto; flex-direction: row; flex-wrap: nowrap; gap: 8px; width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .rank-subnav::-webkit-scrollbar { display: none; }
+  .rank-subtab { flex: 0 0 auto; min-height: 34px; padding: 0 14px; font-size: 14px; white-space: nowrap; text-align: center; }
+  .rank-heading-actions { flex: 1 1 100%; min-width: 0; }
+  .rank-filter-open { flex: 0 0 auto; min-height: 34px; padding: 0 12px; font-size: 14px; white-space: nowrap; }
+  .rank-filter-heading { gap: 8px; }
+  .rank-filter-heading span { flex: 0 0 auto; white-space: nowrap; }
+  .rank-filter-heading strong { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
   /* 海报网格：桌面 7 列 → 手机 3 列 */
   .search-results, .new-grid, .library-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 8px; padding-bottom: 12px; }
   .follow-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 8px; }
@@ -294,6 +306,13 @@
   html.tv-shell .rank-row-meta,
   html.tv-shell .rank-row-intro { font-size: 12px; }
   html.tv-shell .rank-row-heat { font-size: 13px; }
+  html.tv-shell .rank-layout { flex-direction: column; gap: 10px; }
+  html.tv-shell .rank-subnav { flex: 0 0 auto; flex-direction: row; flex-wrap: nowrap; gap: 8px; width: 100%; overflow-x: auto; }
+  html.tv-shell .rank-subtab { flex: 0 0 auto; min-height: 34px; padding: 0 14px; font-size: 14px; white-space: nowrap; }
+  html.tv-shell .rank-filter-open { flex: 0 0 auto; min-height: 34px; padding: 0 12px; font-size: 14px; white-space: nowrap; }
+  html.tv-shell .rank-filter-heading { gap: 8px; }
+  html.tv-shell .rank-filter-heading span { flex: 0 0 auto; white-space: nowrap; }
+  html.tv-shell .rank-filter-heading strong { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   html.tv-shell .radar-view-tab,
   html.tv-shell .radar-filter,
   html.tv-shell .radar-row { font-size: 13px; }
