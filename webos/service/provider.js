@@ -1,6 +1,5 @@
-// First-party webOS provider. This is a clean JavaScript port of the
-// protocol already implemented in the Go core; it does not vendor the GPL
-// provider from another webOS project.
+// Shared-protocol webOS provider. Playback-v5 signing includes separately
+// attributed GPL-3.0-only components; see THIRD_PARTY_NOTICES.md.
 (function () {
   'use strict';
 
@@ -18,6 +17,7 @@
   var createPlaybackIdentity = require('./playback-identity');
   var singleProfile = require('./single-playback-profile');
   var registeredSingleProfile = require('./single-registered-profile');
+  var mobileV5 = require('./mobile-playback-v5');
   var sourceMemory = require('./playback-source-memory')();
   var networkDiagnostic = require('./network-diagnostic');
   var rangeMedia = require('./range-media');
@@ -49,6 +49,7 @@
   var playbackIdentityClosed = false;
   var playbackIdentity = newPlaybackIdentity();
   var registeredSingleIdentity = newRegisteredSingleIdentity();
+  var mobileV5Identity = newPlaybackIdentity();
   function newRegisteredSingleIdentity() { return createPlaybackIdentity(function (signal) {
     return registeredSingleProfile.register(function (target, method, headers, body, limit) { return requestBuffer(target,method,headers,body,limit,signal,8000); });
   }); }
@@ -67,7 +68,7 @@
   }
   function transientVideoModelError(error) {
     if (!error) return false;
-    if (error.code === 'VIDEO_MODEL_HTTP') return [408, 425, 429, 500, 502, 503, 504].indexOf(Number(error.status)) >= 0;
+    if (error.code === 'VIDEO_MODEL_HTTP' || error.code === 'ACCOUNT_DEVICE') return [408, 425, 429, 500, 502, 503, 504].indexOf(Number(error.status)) >= 0;
     return ['VIDEO_MODEL_EMPTY', 'UPSTREAM_TIMEOUT', 'ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ECONNRESET',
       'ECONNREFUSED', 'EPIPE', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ENETDOWN'].indexOf(error.code) >= 0;
   }
@@ -742,7 +743,9 @@
         if (diagnostic.http_status) error.upstreamStatus = diagnostic.http_status;
         state.lastError = error;
         var retryable = freshPlaybackRetryable(error);
-        if (state.attempts < 4 && attempt < maximum && allowed() && retryable && (state.host < 2 || state.rounds < 2)) {
+        // A failed registration consumes a round even before a model request.
+        // Do not retry an exhausted identity merely because its host is zero.
+        if (state.attempts < 4 && attempt < maximum && allowed() && retryable && ((state.legacyDevice && state.host < 2) || state.rounds < 2)) {
           var delay = state.attempts <= 1 ? 250 : 1000;
           if (typeof retry.onRetry === 'function') retry.onRetry(error, delay, state.attempts);
           return recoveryDelay(signal, delay).then(function () { check(); if (!allowed()) throw error; return next(); });
@@ -757,21 +760,70 @@
     if (!error || error.name === 'AbortError') return false;
     return freshPlaybackRetryable(error) || ['VIDEO_MODEL_NO_QUALITY', 'VIDEO_MODEL_MISSING', 'VIDEO_MODEL_INVALID_JSON'].indexOf(error.code) >= 0;
   }
+  function mobileVideoOptions(vid, signal, retry) {
+    var state = retry.identityState, diagnostic = {stage:'multi_video_model',code:'VIDEO_MODEL_REQUEST'};
+    if (state.multiLegacyPending) { state.multiLegacyPending = false; return legacyVideoOptions(vid,signal,retry); }
+    var current = audioCancel.create(), expired = false;
+    var timer = setTimeout(function () { expired = true; current.abort(); },8000);
+    function aborted() { current.abort(); }
+    if (signal) { signal.addEventListener('abort',aborted); if (signal.aborted) current.abort(); }
+    function finish() { clearTimeout(timer); if (signal) signal.removeEventListener('abort',aborted); }
+    function report(value) {
+      diagnostic = Object.assign({},diagnostic,value,{elapsed_ms:Date.now()-retry.startedAt});
+      lastVideoModelDiagnostic = Object.assign({video_id:String(vid)},diagnostic);
+      if (retry.onDiagnostic) retry.onDiagnostic(Object.assign({},diagnostic));
+    }
+    function next(device,attempt) {
+      if (current.signal.aborted || playbackIdentityClosed) throw preparationCancelled();
+      var contentType = retry.contentType || '1004', request = mobileV5.build(String(vid),contentType,device,Date.now());
+      return requestBuffer(request.url,'POST',request.headers,request.body,mobileV5.maxJSON,current.signal,8000).catch(function (error) {
+        // requestBuffer's bounded-body rejection is generic. Classify it only
+        // for this protocol, so malformed v5 data can use the retained sources.
+        if (error.code === 'PROVIDER_ERROR') { error.code = 'VIDEO_MODEL_INVALID_JSON'; error.stage = 'multi_video_model'; }
+        throw error;
+      }).then(function (response) {
+        report({attempt:attempt,http_status:response.status,response_bytes:response.body.length,code:'VIDEO_MODEL_RESPONSE'});
+        if (response.status !== 200) throw fail('mobile video_model HTTP '+response.status,response.status,'VIDEO_MODEL_HTTP','multi_video_model');
+        if (!trim(response.body.toString('utf8'))) throw fail('mobile video_model 返回空响应',502,'VIDEO_MODEL_EMPTY','multi_video_model');
+        var envelope;
+        try { envelope = parseExactJSON(response.body.toString('utf8')); } catch (ignored) { throw fail('mobile video_model 响应无效',502,'VIDEO_MODEL_INVALID_JSON','multi_video_model'); }
+        if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) throw fail('mobile video_model 响应无效',502,'VIDEO_MODEL_INVALID_JSON','multi_video_model');
+        return optionsFromEnvelope(vid,mobileV5.normalize(envelope,String(vid),contentType),current.signal,'multi_video_model',report);
+      }).catch(function (error) {
+        error.videoModel = Object.assign({},diagnostic);
+        if (attempt === 1 && error.code === 'VIDEO_MODEL_EMPTY' && diagnostic.http_status === 200 && !current.signal.aborted) {
+          return mobileV5Identity.refreshAfterEmpty(device,current.signal).then(function (fresh) { return next(fresh,2); });
+        }
+        throw error;
+      });
+    }
+    return mobileV5Identity.get(current.signal).then(function (d) { return next(d,1); }).then(function (options) {
+      finish(); state.multiLegacyPending = true; return options;
+    },function (error) {
+      finish(); if (signal && signal.aborted || playbackIdentityClosed) throw preparationCancelled();
+      if (error.code === 'ACCOUNT_DEVICE') diagnostic = {stage:'device_register'};
+      report({code:error.code || 'VIDEO_MODEL_NETWORK',network_reason:networkDiagnostic(error)});
+      error.videoModel = Object.assign({},diagnostic); state.lastError = error;
+      if (!expired && error.code !== 'PLAYBACK_IDENTITY_COOLDOWN' && !sourceFallbackAllowed(error)) throw error;
+      return legacyVideoOptions(vid,signal,retry);
+    });
+  }
   function legacySingleVideoOptions(vid, signal, retry) {
     var state = retry.identityState, diagnostic, attempt = 0;
     function check() { if (playbackIdentityClosed || signal && signal.aborted) throw preparationCancelled(); }
     function report(value) {
-      diagnostic = Object.assign({}, value, { stage: 'video_model', attempt: state.singleAttempts, elapsed_ms: Date.now() - retry.startedAt });
+      diagnostic = Object.assign({}, value, { stage: value.stage || 'video_model', attempt: state.singleAttempts, elapsed_ms: Date.now() - retry.startedAt });
       lastVideoModelDiagnostic = Object.assign({video_id:String(vid)}, diagnostic);
       if (retry.onDiagnostic) retry.onDiagnostic(Object.assign({}, diagnostic));
     }
     function next() {
       check(); if ((state.singleAttempts || 0) >= 2) throw state.lastError;
       state.singleAttempts = (state.singleAttempts || 0) + 1; attempt++;
-      report({code:'VIDEO_MODEL_REQUEST'});
+      report({stage:'device_register',code:'VIDEO_MODEL_REQUEST'});
       var fresh = newPlaybackIdentity(singleProfile);
       return fresh.get(signal).then(function (device) {
         fresh.close(); check();
+        report({code:'VIDEO_MODEL_REQUEST'});
         var stamp = Date.now(), body = Buffer.from(JSON.stringify({ video_id: String(vid), biz_param: { video_id_type: 0, need_all_video_definition: true, video_platform: 3 } }));
         var signed = passportSign.signPlayback(singleProfile.query(device), body, stamp, device.deviceID);
         var cookies = device.cookies || {}, cookie = Object.keys(cookies).filter(function (key) { return ['install_id','ttreq','store-region','store-region-src'].indexOf(key) >= 0; }).sort().map(function (key) { return key + '=' + cookies[key]; }).join('; ');
@@ -787,7 +839,7 @@
         return optionsFromEnvelope(vid,envelope,signal,'video_model',report);
       }).then(function (options) { state.source = 'video_model'; return options; }).catch(function (error) {
         check(); report(Object.assign({},diagnostic,{code:error.code || 'VIDEO_MODEL_NETWORK',network_reason:networkDiagnostic(error)}));
-        error.videoModel = Object.assign({},diagnostic); error.stage = 'video_model'; if (diagnostic.http_status) error.upstreamStatus = diagnostic.http_status; state.lastError = error;
+        error.videoModel = Object.assign({},diagnostic); error.stage = diagnostic.stage; if (diagnostic.http_status) error.upstreamStatus = diagnostic.http_status; state.lastError = error;
         // An answered but incompatible model must not churn identities.
         if (attempt < 2 && state.singleAttempts < 2 && (!retry.allowRetry || retry.allowRetry()) && freshPlaybackRetryable(error)) return next();
         throw error;
@@ -797,7 +849,7 @@
   }
   function singleVideoOptions(vid, signal, retry) {
     var state=retry.identityState, diagnostic={stage:'video_model',code:'VIDEO_MODEL_REQUEST'};
-    function report(value){diagnostic=Object.assign({},diagnostic,value,{stage:'video_model',elapsed_ms:Date.now()-retry.startedAt});lastVideoModelDiagnostic=Object.assign({video_id:String(vid)},diagnostic);if(retry.onDiagnostic)retry.onDiagnostic(Object.assign({},diagnostic));}
+    function report(value){diagnostic=Object.assign({},diagnostic,value,{stage:value.stage||'video_model',elapsed_ms:Date.now()-retry.startedAt});lastVideoModelDiagnostic=Object.assign({video_id:String(vid)},diagnostic);if(retry.onDiagnostic)retry.onDiagnostic(Object.assign({},diagnostic));}
     if(state.singleLegacyPending){state.singleLegacyPending=false;return legacySingleVideoOptions(vid,signal,retry);}
     var current=audioCancel.create(), expired=false, timer=setTimeout(function(){expired=true;current.abort();},4000);
     function aborted(){current.abort();} if(signal)signal.addEventListener('abort',aborted);
@@ -827,8 +879,10 @@
     }
     return registeredSingleIdentity.get(current.signal).then(function(d){return next(d,1);}).then(function(options){finish();state.singleLegacyPending=true;return options;},function(error){
       finish();if(signal&&signal.aborted||playbackIdentityClosed)throw preparationCancelled();
-      report({code:error.code||'VIDEO_MODEL_NETWORK',network_reason:networkDiagnostic(error)});error.videoModel=Object.assign({},diagnostic);
-      if(!expired && error.code!=='ACCOUNT_DEVICE' && error.code!=='PLAYBACK_IDENTITY_COOLDOWN' && !sourceFallbackAllowed(error))throw error;
+      if(error.code==='ACCOUNT_DEVICE')diagnostic={stage:'device_register'};
+      report({stage:diagnostic.stage,code:error.code||'VIDEO_MODEL_NETWORK',network_reason:networkDiagnostic(error)});error.videoModel=Object.assign({},diagnostic);
+      if(error.code==='ACCOUNT_DEVICE')error.stage='device_register';
+      if(!expired && error.code!=='PLAYBACK_IDENTITY_COOLDOWN' && !sourceFallbackAllowed(error))throw error;
       return legacySingleVideoOptions(vid,signal,retry);
     });
   }
@@ -838,16 +892,16 @@
     if (signal && signal.aborted || playbackIdentityClosed) return Promise.reject(preparationCancelled());
     if (!state.plan) state.plan = sourceMemory.plan('');
     state.cursor = state.cursor || 0;
-    if (state.cursor >= state.plan.order.length && !state.singleLegacyPending) return Promise.reject(state.lastError || fail('片源已尝试完毕',502,'VIDEO_MODEL_NO_QUALITY'));
-    var legacyOnly=!!state.singleLegacyPending;
-    var provider = legacyOnly ? 'video_model' : state.plan.order[state.cursor], single = provider === 'video_model';
+    if (state.cursor >= state.plan.order.length && !state.singleLegacyPending && !state.multiLegacyPending) return Promise.reject(state.lastError || fail('片源已尝试完毕',502,'VIDEO_MODEL_NO_QUALITY'));
+    var legacyOnly=!!(state.singleLegacyPending || state.multiLegacyPending);
+    var provider = state.multiLegacyPending ? 'multi_video_model' : state.singleLegacyPending ? 'video_model' : state.plan.order[state.cursor], single = provider === 'video_model';
     var remaining = 30000 - (state.resolveSpent || 0);
     if (remaining <= 0) return Promise.reject(fail('播放取源超时',504,'UPSTREAM_TIMEOUT'));
     // Preserve the existing 22-second tab/legacy group and 8-second single
     // budget, regardless of which provider this series remembers first.
     var group = single ? 'singleSpent' : 'primarySpent';
     var limit = Math.min(remaining, (single ? 8000 : 22000) - (state[group] || 0));
-    if (limit <= 0) { state.singleLegacyPending=false; if(!legacyOnly)state.cursor++; return videoOptions(vid, signal, retry); }
+    if (limit <= 0) { state.singleLegacyPending=false; state.multiLegacyPending=false; if(!legacyOnly)state.cursor++; return videoOptions(vid, signal, retry); }
     var current = audioCancel.create(), started = Date.now(), expired = false;
     function aborted() { current.abort(); }
     if (signal) signal.addEventListener('abort',aborted);
@@ -858,7 +912,7 @@
       state.resolveSpent = (state.resolveSpent || 0) + spent;
       state[group] = (state[group] || 0) + spent;
     }
-    var request = provider === 'video_tab' ? videoTabOptions : single ? singleVideoOptions : legacyVideoOptions;
+    var request = provider === 'video_tab' ? videoTabOptions : single ? singleVideoOptions : mobileVideoOptions;
     return request(vid,current.signal,retry).then(function (options) {
       finish(); state.source = provider; if(!legacyOnly)state.cursor++; return options;
     }, function (error) {
@@ -866,8 +920,8 @@
       if (signal && signal.aborted || playbackIdentityClosed) throw preparationCancelled();
       if (expired) error = fail('播放取源超时',504,'UPSTREAM_TIMEOUT');
       var tab = provider === 'video_tab';
-      var exhausted = single || state.attempts >= 4 || !freshPlaybackRetryable(error) || expired;
-      if (tab ? error.code === 'ACCOUNT_DEVICE' || error.name === 'AbortError' : !sourceFallbackAllowed(error)) throw error;
+      var exhausted = single || state.attempts >= 4 || (!state.legacyDevice && state.rounds >= 2) || !freshPlaybackRetryable(error) || expired;
+      if (tab ? (error.code === 'ACCOUNT_DEVICE' && !transientVideoModelError(error)) || error.name === 'AbortError' : !sourceFallbackAllowed(error)) throw error;
       if (error.code !== 'VIDEO_TAB_REJECTED') state.plan.observe(provider,false);
       state.lastError = error;
       // A speculative legacy request may be resumed by its foreground users,
@@ -1245,7 +1299,7 @@
       if (record.resolveCancel.signal.aborted) throw preparationCancelled();
       if (!mediaSourceFallbackAllowed(error)) throw error;
       record.identityState.plan.observe(record.identityState.source,false);
-      if (record.identityState.cursor >= record.identityState.plan.order.length && !record.identityState.singleLegacyPending) throw error;
+      if (record.identityState.cursor >= record.identityState.plan.order.length && !record.identityState.singleLegacyPending && !record.identityState.multiLegacyPending) throw error;
       record.identityState.lastError = fail('原片源媒体不可用',502,'VIDEO_MODEL_MISSING');
       return videoOptions(vid,record.resolveCancel.signal,{identityState:record.identityState,contentType:contentType,startedAt:resolveStartedAt,onDiagnostic:diagnostic,allowRetry:foregroundWaiting}).then(prepareOptions);
     }
@@ -2163,11 +2217,11 @@
     startCache: function () {
       // Luna may wake the same JS Service instance after shutdown, without
       // restarting its process. Never leave its playback identity closed.
-      if (playbackIdentityClosed) { playbackIdentity = newPlaybackIdentity(); registeredSingleIdentity = newRegisteredSingleIdentity(); playbackIdentityClosed = false; }
+      if (playbackIdentityClosed) { playbackIdentity = newPlaybackIdentity(); registeredSingleIdentity = newRegisteredSingleIdentity(); mobileV5Identity = newPlaybackIdentity(); playbackIdentityClosed = false; }
       ensureCacheRoot(); mediaCache.start();
     },
     closeCache: function () {
-      playbackIdentityClosed = true; playbackIdentity.close(); registeredSingleIdentity.close();
+      playbackIdentityClosed = true; playbackIdentity.close(); registeredSingleIdentity.close(); mobileV5Identity.close();
       sourceMemory.clear();
       Object.keys(jobs).forEach(function (key) { jobs[key].resolveCancel.abort('PLAYBACK_PREPARATION_CANCELLED'); });
       Object.keys(audioJobs).forEach(function (key) { audioJobs[key].cancel.abort(); });
